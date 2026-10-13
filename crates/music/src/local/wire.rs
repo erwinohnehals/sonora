@@ -588,6 +588,7 @@ pub fn track_from_file(
             tags: Vec::new(),
             languages: Vec::new(),
             credits: Vec::new(),
+            isrc: None,
         },
         album_artist,
         album_artists,

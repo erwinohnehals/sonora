@@ -301,6 +301,7 @@ fn open_window(cx: &mut App) {
         session,
         cover: _,
         drm: _,
+        export: _,
         library,
         history: _,
         lyrics: _,

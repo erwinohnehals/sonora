@@ -746,6 +746,22 @@ settings-rescan = Rescan
 settings-scan-walking = Scanning…
 settings-scan-progress = { $percent }%
 settings-scan-done = Done in { $seconds }s
+settings-export = Export library
+settings-export-detail = Your favorites and playlists as CSV and JSON. Track lists only, no audio
+settings-export-button = Export…
+settings-export-listing = Listing your playlists…
+settings-export-reading = Reading { $done } of { $total } lists…
+settings-export-writing = Writing files…
+settings-export-done = { $tracks ->
+    [one] Saved { $tracks } song to { $folder }
+   *[other] Saved { $tracks } songs to { $folder }
+}
+settings-export-skipped = { $skipped ->
+    [one] { $skipped } playlist could not be read
+   *[other] { $skipped } playlists could not be read
+}
+settings-export-failed = Export failed: { $reason }
+export-folder = { $provider } library
 settings-tab-about = About
 settings-version = Version
 settings-version-detail = The build of sonora you are running
@@ -827,6 +843,8 @@ toast-library-add-failed = { $name } could not be added to your library
 toast-library-remove-failed = { $name } could not be removed from your library
 toast-library-added = Added to your library
 toast-library-removed = Removed from your library
+toast-library-exported = Library exported to { $name }
+toast-library-export-failed = The library could not be exported
 
 # lyrics
 lyrics-title = Lyrics

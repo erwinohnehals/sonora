@@ -140,6 +140,7 @@ impl Store {
                     tags: Vec::new(),
                     languages: Vec::new(),
                     credits: Vec::new(),
+                    isrc: None,
                 })
             })
             .context("cannot read listening history")?;

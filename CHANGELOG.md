@@ -13,6 +13,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pin's Move to folder menu, then drag pins onto it. Deleting a folder keeps its pins pinned.
 - Right-click a local song and pick Show in File Explorer (Finder on macOS) to open its folder with
   the file selected.
+- Export your favorites and playlists from Settings → General → Export library. Sonora saves one
+  spreadsheet per list and a `library.json` with every track's title, artists, album, ISRC, date
+  added and link, so you keep a record of your library outside the service.
 
 ## [0.42.2] - 2026-10-07
 

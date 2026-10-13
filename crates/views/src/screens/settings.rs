@@ -12,7 +12,7 @@ use crate::shared::text;
 use crate::shared::veil::{Edge, veil};
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, FocusHandle, FontWeight, MouseButton,
-    MouseUpEvent, Pixels, Render, SharedString, Task, Window, div, px, relative,
+    MouseUpEvent, PathPromptOptions, Pixels, Render, SharedString, Task, Window, div, px, relative,
 };
 use gpui::{ScrollHandle, prelude::*, svg};
 use i18n::{Language, t};
@@ -22,8 +22,9 @@ use music::scrobble::{Link, Secret};
 use music::{AccountChoice, SignIn, SignInPrompt, WritingSystem};
 use router::{Destination, NavEntry, Screen, SettingsTab, navigate};
 use state::{
-    AppSettings, CdmState, DiscordName, Drm, Failure, FullscreenControlsAutohide, Io, Playback,
-    SYSTEM_FONT, Scan, ScrobbleState, Scrobbling, Session, SessionState, Sleep, Sonora,
+    AppSettings, CdmState, DiscordName, Drm, Export, ExportNames, ExportState, Failure,
+    FullscreenControlsAutohide, Io, Playback, SYSTEM_FONT, Scan, ScrobbleState, Scrobbling,
+    Session, SessionState, Sleep, Sonora,
 };
 use ui::{ActiveTheme as _, Deck, LEADING, Scrollbar, Scroller, eyebrow, snapped};
 use ui::{
@@ -129,6 +130,7 @@ enum Slot {
     TrayIcon,
     Accounts,
     LocalFolder,
+    Export,
     Theme,
     Adaptive,
     Ambient,
@@ -289,6 +291,7 @@ pub struct SettingsView {
     session: Entity<Session>,
     playback: Entity<Playback>,
     drm: Entity<Drm>,
+    export: Entity<Export>,
     settings: Entity<AppSettings>,
     tab: SettingsTab,
     search: Entity<Input>,
@@ -353,7 +356,9 @@ impl SettingsView {
         let settings = Sonora::global(cx).settings.clone();
         let scrobbling = Sonora::global(cx).scrobbling.clone();
         let drm = Sonora::global(cx).drm.clone();
+        let export = Sonora::global(cx).export.clone();
         cx.observe(&drm, |_, _, cx| cx.notify()).detach();
+        cx.observe(&export, |_, _, cx| cx.notify()).detach();
         cx.observe(&session, |_, _, cx| cx.notify()).detach();
         cx.observe(&scrobbling, |_, _, cx| cx.notify()).detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
@@ -398,6 +403,7 @@ impl SettingsView {
             session,
             playback,
             drm,
+            export,
             settings,
             tab: SettingsTab::General,
             search,
@@ -554,7 +560,10 @@ impl SettingsView {
                 Slot::Accounts,
                 Slot::Title("settings-group-library"),
                 Slot::LocalFolder,
-            ],
+            ]
+            .into_iter()
+            .chain(self.session.read(cx).client().map(|_| Slot::Export))
+            .collect(),
             SettingsTab::Appearance => vec![
                 Slot::Title("settings-tab-general"),
                 Slot::Theme,
@@ -684,6 +693,7 @@ impl SettingsView {
                     false => SharedString::default(),
                 },
             ),
+            Slot::Export => (t!("settings-export"), t!("settings-export-detail")),
             Slot::Theme => (t!("settings-theme"), t!("settings-theme-detail")),
             Slot::Adaptive => (t!("settings-adaptive"), t!("settings-adaptive-detail")),
             Slot::Ambient => (t!("settings-ambient"), t!("settings-ambient-detail")),
@@ -940,6 +950,7 @@ impl SettingsView {
             Slot::TrayIcon => self.tray_icon_row(cx).element,
             Slot::Accounts => self.accounts_row(cx).element,
             Slot::LocalFolder => self.local_folder_row(cx).element,
+            Slot::Export => self.export_row(cx).element,
             Slot::Theme => self.theme_row(cx).element,
             Slot::Adaptive => self.adaptive_row(cx).element,
             Slot::Ambient => self.ambient_row(cx).element,
@@ -3170,6 +3181,92 @@ impl SettingsView {
                     })),
             )
             .into_any_element()
+    }
+
+    /// The row that writes the streaming library's favorites and playlists to a folder the
+    /// listener picks. Its detail line follows the export while it runs and keeps the outcome.
+    fn export_row(&self, cx: &mut Context<Self>) -> Setting {
+        let theme = *cx.theme();
+        let export = self.export.read(cx);
+        let running = export.running();
+        let (detail, color) = match export.state() {
+            ExportState::Idle => (t!("settings-export-detail"), theme.muted_foreground),
+            ExportState::Reading { total: 0, .. } => {
+                (t!("settings-export-listing"), theme.muted_foreground)
+            }
+            ExportState::Reading { done, total } => (
+                t!("settings-export-reading", done = *done, total = *total),
+                theme.muted_foreground,
+            ),
+            ExportState::Writing => (t!("settings-export-writing"), theme.muted_foreground),
+            ExportState::Done {
+                folder,
+                tracks,
+                skipped,
+                ..
+            } => {
+                let name = folder
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let done = t!("settings-export-done", tracks = *tracks, folder = name);
+                let detail = match skipped {
+                    0 => done,
+                    _ => format!(
+                        "{done} · {}",
+                        t!("settings-export-skipped", skipped = *skipped)
+                    )
+                    .into(),
+                };
+                (detail, theme.muted_foreground)
+            }
+            ExportState::Failed(reason) => (
+                t!("settings-export-failed", reason = reason.as_str()),
+                theme.danger,
+            ),
+        };
+
+        self.row(
+            t!("settings-export"),
+            detail,
+            color,
+            theme.text(Text::Small),
+            Button::new("export-library")
+                .label(t!("settings-export-button"))
+                .small()
+                .outline()
+                .disabled(running)
+                .on_click(cx.listener(|this, _, _, cx| this.choose_export_folder(cx)))
+                .into_any_element(),
+        )
+    }
+
+    /// Asks for the folder to export into, then starts the export there. The names of what it
+    /// writes are resolved now, in the language the listener is reading.
+    fn choose_export_folder(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+        let provider = self.session.read(cx).provider_name().unwrap_or_default();
+        let names = ExportNames {
+            folder: t!("export-folder", provider = provider).to_string(),
+            liked: t!("library-liked-songs").to_string(),
+            playlists: t!("nav-playlists").to_string(),
+        };
+        let export = self.export.clone();
+        cx.spawn(async move |_, cx| {
+            let Ok(Ok(Some(paths))) = receiver.await else {
+                return;
+            };
+            let Some(parent) = paths.into_iter().next() else {
+                return;
+            };
+            export.update(cx, |export, cx| export.start(parent, names, cx));
+        })
+        .detach();
     }
 
     fn rescan_local_folder(&mut self, cx: &mut Context<Self>) {
