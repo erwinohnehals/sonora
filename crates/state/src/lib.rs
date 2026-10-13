@@ -46,7 +46,7 @@ pub use library::{
 pub use logging::log_file;
 pub use lyrics::{Lyrics, LyricsState};
 pub use network::{Network, Reconnected};
-pub use pins::{PinSort, Pins};
+pub use pins::{PinFolder, PinRow, PinSort, Pins};
 pub use playback::{Origin, Playback, PlaybackState, Repeat, Sleep, Whence};
 pub use profile::Profile;
 pub use queue::{Named, Queue, Resume, Stub};

@@ -1,9 +1,9 @@
 use std::rc::Rc;
 
 use ui::{
-    ActiveTheme as _, Button, Card, Deck, DraggedPin, Edge, MenuItem, Panel, Picker, Pin,
-    Pinnable as _, Popup, SNUG, Scroller, Shield, Side, Spot, Tabs, Text, Vacancy, drop_gap,
-    drop_marker,
+    ActiveTheme as _, Button, Card, Deck, DraggedPin, Edge, Menu, MenuItem, Panel, Picker, Pin,
+    Pinnable as _, Popup, SNUG, Scroller, Shield, Side, Spot, SubmenuState, Tabs, Text, Vacancy,
+    drop_gap, drop_marker,
 };
 
 use gpui::prelude::*;
@@ -12,12 +12,17 @@ use gpui::{
     Pixels, Point, Render, ScrollHandle, svg,
 };
 use gpui::{Window, div, px};
+use i18n::t;
 use router::{
     Destination, LibraryTab, NavEntry, Navigation, NavigationEvent, SettingsTab, navigate,
 };
-use state::{AppSettings, Library, Origin, PinSort, Pins, Playback, Session, Shelf, Sonora};
+use state::{
+    AppSettings, Library, Origin, PinFolder, PinRow, PinSort, Pins, Playback, Session, Shelf,
+    Sonora,
+};
 
 use crate::shared::menus::{ItemMenu, item_menu};
+use crate::shared::playlist_editor::{Edit, PlaylistEditor};
 
 /// The one drag list the pinned section keeps, so a pin dropped anywhere in it lands in order.
 const PINS: &str = "sidebar-pins";
@@ -66,6 +71,9 @@ const VACANCY_HEIGHT: Pixels = px(88.);
 const PIN_MARK: f32 = 0.7;
 /// The space between two pinned entries, the same as the `gap_1` between the rows above them.
 const ROW_GAP: Pixels = px(4.);
+/// How many pads a folder's pins sit in from the folder.
+const NEST: f32 = 2.;
+const FOLDER_MENU: Pixels = px(220.);
 
 /// The two navigation entries that expand into tabs rather than navigate.
 #[derive(Clone, Copy, PartialEq)]
@@ -84,6 +92,42 @@ impl Group {
     }
 }
 
+/// Where a pin dragged over the pinned section would land.
+#[derive(Clone, Copy, PartialEq)]
+enum Aim {
+    /// At the end of a folder, aimed at from the folder's own row.
+    Into(u64),
+    /// At a slot among the pins of a folder, or among the pins in none.
+    Gap { folder: Option<u64>, gap: usize },
+}
+
+/// Where an entry of the pinned section sits, which decides where a pin dropped on it lands.
+#[derive(Clone, Copy)]
+enum Seat {
+    /// A pin: its folder, its slot there, and whether it is the last one there. `tail` marks
+    /// the last pinned row of all while no pin sits outside a folder, since a drop among those
+    /// pins is then drawn below it.
+    Held {
+        folder: Option<u64>,
+        slot: usize,
+        last: bool,
+        tail: bool,
+    },
+    /// The library under the pins. A drop lands after the `loose` pins that are in no folder.
+    Library { loose: usize },
+}
+
+/// What a right click in the pinned section opened a menu on.
+#[derive(Clone)]
+enum Target {
+    /// A pin, or an entry of the library under the pins when `held` is false.
+    Pin {
+        pin: Pin,
+        held: bool,
+    },
+    Folder(PinFolder),
+}
+
 pub(crate) struct SidebarLeft {
     settings: Entity<AppSettings>,
     session: Entity<Session>,
@@ -97,12 +141,13 @@ pub(crate) struct SidebarLeft {
     local_open: bool,
     pinned_open: bool,
     dropping: bool,
-    drop_gap: Option<usize>,
+    aim: Option<Aim>,
     playback: Entity<Playback>,
     pins: Entity<Pins>,
     library: Entity<Library>,
     track_menu: ItemMenu,
-    context_menu: Option<(Pin, Point<Pixels>)>,
+    folder_submenu: SubmenuState,
+    context_menu: Option<(Target, Point<Pixels>)>,
     scrollbar: Entity<ui::Scrollbar>,
     popovers: ui::Popovers,
 }
@@ -151,11 +196,12 @@ impl SidebarLeft {
             local_open,
             pinned_open,
             dropping: false,
-            drop_gap: None,
+            aim: None,
             playback,
             pins,
             library,
             track_menu: ItemMenu::new(playlist_scrollbar, cx),
+            folder_submenu: SubmenuState::default(),
             context_menu: None,
             scrollbar,
             popovers: ui::Popovers::default(),
@@ -174,18 +220,84 @@ impl SidebarLeft {
 
     fn dismiss_menu(&mut self, cx: &mut Context<Self>) {
         self.track_menu.reset(cx);
+        self.folder_submenu.reset();
         self.context_menu = None;
         cx.notify();
     }
 
+    /// Opens a context menu on `target` where the pointer went down.
+    fn summon(&mut self, target: Target, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.track_menu.reset(cx);
+        self.folder_submenu.reset();
+        self.context_menu = Some((target, position));
+        cx.notify();
+    }
+
     fn menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let (pin, position) = self.context_menu.clone()?;
-        let menu = item_menu(&pin, &self.track_menu, self.playback.clone(), cx);
+        let (target, position) = self.context_menu.clone()?;
+        let menu = match target {
+            Target::Pin { pin, held } => {
+                let menu = item_menu(&pin, &self.track_menu, self.playback.clone(), cx);
+                match held {
+                    true => menu.item(self.folder_item(&pin, cx)),
+                    false => menu,
+                }
+            }
+            Target::Folder(folder) => folder_menu(folder, self.pins.clone()),
+        };
 
         Some(
             Popup::new(position, menu)
                 .on_close(cx.listener(|this, _, _, cx| this.dismiss_menu(cx))),
         )
+    }
+
+    /// The Move to folder entry of a pin's menu: New folder, then every folder with the one
+    /// holding the pin checked, then a way back out of it.
+    fn folder_item(&self, pin: &Pin, cx: &App) -> MenuItem {
+        let current = self.pins.read(cx).folder_of(pin, cx);
+        let folders = self.pins.read(cx).folders(cx);
+        let fresh = pin.clone();
+        let freed = pin.clone();
+        let pins = self.pins.clone();
+
+        let menu = Menu::new("pin-folder-submenu")
+            .w(FOLDER_MENU)
+            .item(
+                MenuItem::new("new-pin-folder", t!("nav-new-folder"))
+                    .icon("icons/folder-plus.svg")
+                    .on_click(move |_, window, cx| {
+                        PlaylistEditor::open(Edit::CreateFolder(Some(fresh.clone())), window, cx);
+                    }),
+            )
+            .items(
+                (!folders.is_empty())
+                    .then(|| MenuItem::separator("pin-folder-separator"))
+                    .into_iter()
+                    .chain(folders.into_iter().map(|folder| {
+                        let pins = pins.clone();
+                        let pin = pin.clone();
+                        let id = folder.id;
+
+                        MenuItem::new(format!("pin-folder-{id}"), folder.name)
+                            .icon("icons/folder.svg")
+                            .checked(current == Some(id))
+                            .on_click(move |_, _, cx| {
+                                pins.update(cx, |pins, cx| pins.file(pin.clone(), Some(id), cx));
+                            })
+                    })),
+            )
+            .items(current.map(|_| {
+                MenuItem::new("pin-folder-out", t!("nav-move-out-of-folder"))
+                    .icon("icons/undo-2.svg")
+                    .on_click(move |_, _, cx| {
+                        pins.update(cx, |pins, cx| pins.file(freed.clone(), None, cx));
+                    })
+            }));
+
+        MenuItem::new("move-to-folder", t!("nav-move-to-folder"))
+            .icon("icons/folder.svg")
+            .submenu(menu, self.folder_submenu.clone())
     }
 
     pub fn is_open(&self) -> bool {
@@ -290,7 +402,7 @@ impl SidebarLeft {
         }
 
         let pins = self.pins.read(cx);
-        let pinned = pins.entries(cx);
+        let pinned = pins.rows(cx);
         let rest = match self.settings.read(cx).sidebar_full_library() {
             true => pins.library(cx),
             false => Rc::new(Vec::new()),
@@ -304,6 +416,10 @@ impl SidebarLeft {
         }
 
         let held = pinned.len();
+        let loose = pinned
+            .iter()
+            .filter(|row| matches!(row, PinRow::Pin { folder: None, .. }))
+            .count();
         let count = held + rest.len();
         let row = ui::snapped(cx.theme().metrics.list_row, window);
         rows.push(
@@ -311,12 +427,33 @@ impl SidebarLeft {
                 .rows((0..count).map(|_| row))
                 .gap(ROW_GAP)
                 .draw(cx.processor(move |this, index: usize, _, cx| {
-                    let pin = match index < held {
-                        true => pinned.get(index),
-                        false => rest.get(index - held),
-                    };
-                    match pin {
-                        Some(pin) => this.pin_row(index, pin.clone(), held, cx),
+                    if index >= held {
+                        return match rest.get(index - held) {
+                            Some(pin) => {
+                                this.pin_row(index, pin.clone(), Seat::Library { loose }, cx)
+                            }
+                            None => div().into_any_element(),
+                        };
+                    }
+                    let tail = loose == 0 && index + 1 == held;
+                    match pinned.get(index).cloned() {
+                        Some(PinRow::Folder { folder, count }) => {
+                            this.folder_row(index, folder, count, tail, cx)
+                        }
+                        Some(PinRow::Pin {
+                            pin,
+                            folder,
+                            slot,
+                            last,
+                        }) => {
+                            let seat = Seat::Held {
+                                folder,
+                                slot,
+                                last,
+                                tail,
+                            };
+                            this.pin_row(index, pin, seat, cx)
+                        }
                         None => div().into_any_element(),
                     }
                 }))
@@ -390,14 +527,19 @@ impl SidebarLeft {
                     })),
             )
             .when(open, |header| header.child(self.sort_picker(cx)))
-            // Dragging over the header aims at the top of the list, which is otherwise
-            // out of reach above the first entry.
+            // Dragging over the header aims at the top of the pins in no folder, which is
+            // otherwise out of reach above the first entry, and is the way out of a folder
+            // when every pin is in one.
             .on_drag_move(
                 cx.listener(|this, event: &DragMoveEvent<DraggedPin>, _, cx| {
-                    if !event.bounds.contains(&event.event.position) || this.drop_gap == Some(0) {
+                    let top = Some(Aim::Gap {
+                        folder: None,
+                        gap: 0,
+                    });
+                    if !event.bounds.contains(&event.event.position) || this.aim == top {
                         return;
                     }
-                    this.drop_gap = Some(0);
+                    this.aim = top;
                     cx.notify();
                 }),
             )
@@ -452,23 +594,111 @@ impl SidebarLeft {
                 }
             }),
         )
+        .item(MenuItem::separator("sidebar-pins-folders"))
+        .item(
+            MenuItem::new("sidebar-new-folder", t!("nav-new-folder"))
+                .icon("icons/folder-plus.svg")
+                .on_click(|_, window, cx| {
+                    PlaylistEditor::open(Edit::CreateFolder(None), window, cx);
+                }),
+        )
         .into_any_element()
     }
 
-    /// One entry. The first `count` of them are the pins, which carry the drop slots. The rest
-    /// is the library underneath, which can be dragged up into the pins but holds no slot.
-    fn pin_row(&self, index: usize, pin: Pin, count: usize, cx: &mut Context<Self>) -> AnyElement {
+    /// A folder's row. A click opens or shuts it, and a pin dropped on it lands at its end.
+    fn folder_row(
+        &self,
+        index: usize,
+        folder: PinFolder,
+        count: usize,
+        tail: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = *cx.theme();
+        let accent = theme.sidebar_accent;
+        let id = folder.id;
+        let aimed = self.aim == Some(Aim::Into(id));
+        let edge = (tail && self.aims_loose()).then_some(Edge::Below);
+        let icon = match folder.open {
+            true => "icons/folder-open.svg",
+            false => "icons/folder.svg",
+        };
+        let chevron = svg()
+            .path(icons::path(chevron(folder.open)))
+            .flex_none()
+            .size(theme.text(Text::Small))
+            .text_color(theme.muted_foreground);
+        let named = folder.clone();
+
+        let card = Card::new(("pin-folder", index), folder.name)
+            .fallback(icon)
+            .tint(theme.muted_foreground)
+            .meta(t!("nav-folder-count", count = count))
+            .trailing(chevron)
+            .when(aimed, |card| card.bg(accent))
+            .hover(move |style| style.bg(accent))
+            .press(cx.listener(move |this, _, _, cx| {
+                this.pins.update(cx, |pins, cx| pins.flip_folder(id, cx));
+            }))
+            .menu(cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                this.summon(Target::Folder(named.clone()), event.position, cx);
+            }))
+            .on_drag_move(
+                cx.listener(move |this, event: &DragMoveEvent<DraggedPin>, _, cx| {
+                    let aim = Some(Aim::Into(id));
+                    if !event.bounds.contains(&event.event.position) || this.aim == aim {
+                        return;
+                    }
+                    this.aim = aim;
+                    cx.notify();
+                }),
+            );
+
+        seated(index, false, card, edge.map(|edge| (edge, true)), cx)
+    }
+
+    /// Whether the drag aims among the pins in no folder.
+    fn aims_loose(&self) -> bool {
+        matches!(self.aim, Some(Aim::Gap { folder: None, .. }))
+    }
+
+    /// One entry: a pin, which carries a drop slot in its folder, or a row of the library
+    /// underneath, which can be dragged up into the pins but holds no slot.
+    fn pin_row(&self, index: usize, pin: Pin, seat: Seat, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
         let accent = theme.sidebar_accent;
         let destination = Destination::from(&pin);
         let active = destination == self.trail.read(cx).current();
         let opened = pin.clone();
-        let held = index < count;
+        let held = matches!(seat, Seat::Held { .. });
+        let nested = matches!(
+            seat,
+            Seat::Held {
+                folder: Some(_),
+                ..
+            }
+        );
         // Only worth marking when the library sits alongside, since otherwise every row is a pin.
         let marked = held && self.settings.read(cx).sidebar_full_library();
-        let edge = match self.drop_gap {
-            Some(gap) if held && gap == index => Some(Edge::Above),
-            Some(gap) if gap == count && index + 1 == count => Some(Edge::Below),
+        // A marker is drawn full width when it stands for the pins in no folder, even on a row
+        // inside one, and set in with the row otherwise.
+        let marker = match (self.aim, seat) {
+            (
+                Some(Aim::Gap { folder, gap }),
+                Seat::Held {
+                    folder: home,
+                    slot,
+                    last,
+                    ..
+                },
+            ) if folder == home && (gap == slot || (last && gap == slot + 1)) => {
+                let edge = match gap == slot {
+                    true => Edge::Above,
+                    false => Edge::Below,
+                };
+                Some((edge, false))
+            }
+            (_, Seat::Held { tail: true, .. }) if self.aims_loose() => Some((Edge::Below, true)),
             _ => None,
         };
 
@@ -495,9 +725,11 @@ impl SidebarLeft {
             .hover(move |style| style.bg(accent))
             .press(move |_, _, cx| navigate(destination.clone(), cx))
             .menu(cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                this.track_menu.reset(cx);
-                this.context_menu = Some((opened.clone(), event.position));
-                cx.notify();
+                let target = Target::Pin {
+                    pin: opened.clone(),
+                    held,
+                };
+                this.summon(target, event.position, cx);
             }))
             .when_else(
                 held,
@@ -506,29 +738,28 @@ impl SidebarLeft {
             )
             .on_drag_move(
                 cx.listener(move |this, event: &DragMoveEvent<DraggedPin>, _, cx| {
-                    let Some(gap) = drop_gap(event.bounds, event.event.position, index) else {
+                    let slot = match seat {
+                        Seat::Held { slot, .. } => slot,
+                        Seat::Library { .. } => 0,
+                    };
+                    let Some(gap) = drop_gap(event.bounds, event.event.position, slot) else {
                         return;
                     };
-                    let gap = Some(match held {
-                        true => gap,
-                        false => count,
+                    let aim = Some(match seat {
+                        Seat::Held { folder, .. } => Aim::Gap { folder, gap },
+                        Seat::Library { loose } => Aim::Gap {
+                            folder: None,
+                            gap: loose,
+                        },
                     });
-                    if this.drop_gap != gap {
-                        this.drop_gap = gap;
+                    if this.aim != aim {
+                        this.aim = aim;
                         cx.notify();
                     }
                 }),
             );
 
-        div()
-            .id(("pinned-slot", index))
-            .relative()
-            .flex_none()
-            .w_full()
-            .min_w_0()
-            .child(card)
-            .when_some(edge, |this, edge| this.child(drop_marker(edge, cx)))
-            .into_any_element()
+        seated(index, nested, card, marker, cx)
     }
 
     /// One navigation entry. An expandable one flips its group open and shut, any other one
@@ -617,7 +848,7 @@ impl Render for SidebarLeft {
 
         if !cx.has_active_drag() {
             self.dropping = false;
-            self.drop_gap = None;
+            self.aim = None;
         }
 
         let mut rows = self.navigation(cx);
@@ -648,10 +879,14 @@ impl Render for SidebarLeft {
                 cx.notify();
             }))
             .on_drop(cx.listener(|this, dragged: &DraggedPin, _, cx| {
-                let gap = this.drop_gap.take();
+                let aim = this.aim.take();
                 this.dropping = false;
                 let pin = dragged.pin.clone();
-                this.pins.update(cx, |pins, cx| pins.place(pin, gap, cx));
+                this.pins.update(cx, |pins, cx| match aim {
+                    Some(Aim::Into(folder)) => pins.file(pin, Some(folder), cx),
+                    Some(Aim::Gap { folder, gap }) => pins.place(pin, folder, Some(gap), cx),
+                    None => pins.place(pin, None, None, cx),
+                });
                 cx.notify();
             }))
             .when(!self.is_open(), |this| this.hidden())
@@ -730,6 +965,64 @@ fn caption(kind: &'static str, marked: bool, cx: &App) -> impl IntoElement {
             )
         })
         .child(div().min_w_0().truncate().child(i18n::lookup(kind, None)))
+}
+
+/// An entry of the pinned section in its slot, set in when it sits in a folder. `marker` is
+/// the drop line to draw on it, and whether it spans the slot's full width rather than the
+/// entry's.
+fn seated(
+    index: usize,
+    nested: bool,
+    card: Card,
+    marker: Option<(Edge, bool)>,
+    cx: &App,
+) -> AnyElement {
+    let theme = *cx.theme();
+    let (inner, outer) = match marker {
+        Some((edge, true)) => (None, Some(edge)),
+        Some((edge, false)) => (Some(edge), None),
+        None => (None, None),
+    };
+
+    div()
+        .id(("pinned-slot", index))
+        .relative()
+        .flex_none()
+        .w_full()
+        .min_w_0()
+        .when(nested, |slot| slot.pl(theme.metrics.pad * NEST))
+        .child(
+            div()
+                .relative()
+                .w_full()
+                .min_w_0()
+                .child(card)
+                .when_some(inner, |entry, edge| entry.child(drop_marker(edge, cx))),
+        )
+        .when_some(outer, |slot, edge| slot.child(drop_marker(edge, cx)))
+        .into_any_element()
+}
+
+/// A folder's own menu: rename it, or delete it and leave its pins pinned.
+fn folder_menu(folder: PinFolder, pins: Entity<Pins>) -> Menu {
+    let id = folder.id;
+
+    Menu::new("pin-folder-menu")
+        .item(
+            MenuItem::new("rename-pin-folder", t!("nav-rename-folder"))
+                .icon("icons/pencil.svg")
+                .on_click(move |_, window, cx| {
+                    PlaylistEditor::open(Edit::RenameFolder(folder.clone()), window, cx);
+                }),
+        )
+        .item(
+            MenuItem::new("delete-pin-folder", t!("nav-delete-folder"))
+                .icon("icons/trash-2.svg")
+                .tooltip("nav-delete-folder-tip")
+                .on_click(move |_, _, cx| {
+                    pins.update(cx, |pins, cx| pins.remove_folder(id, cx));
+                }),
+        )
 }
 
 fn hint(cx: &App) -> AnyElement {

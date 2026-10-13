@@ -7,6 +7,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Group your pins into folders in the sidebar. Make one from the pinned section's menu or from a
+  pin's Move to folder menu, then drag pins onto it. Deleting a folder keeps its pins pinned.
+
 ## [0.42.2] - 2026-10-07
 
 ### Added

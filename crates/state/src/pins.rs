@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use gpui::{App, Context, Entity};
 use music::{PinTarget, PinTargetKind};
+use serde::{Deserialize, Serialize};
 use ui::{Pin, PinKind};
 
 use crate::library::{Library, LibraryEvent, Shelf};
@@ -41,6 +42,37 @@ impl PinSort {
     }
 }
 
+/// A folder in the pinned list. Folders are Sonora's own, so no provider hears of them, and one
+/// can hold pins of any provider.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinFolder {
+    pub id: u64,
+    pub name: String,
+    /// Whether the sidebar lists the folder's pins under it.
+    #[serde(default)]
+    pub open: bool,
+}
+
+/// One line of the pinned list as the sidebar draws it: the folders first, each followed by its
+/// pins while it is open, then the pins in no folder.
+#[derive(Clone, Debug)]
+pub enum PinRow {
+    /// A folder, with how many pins it holds.
+    Folder { folder: PinFolder, count: usize },
+    /// A pin. `slot` counts it among the pins of its folder, or among the pins in none, and
+    /// `last` marks the final one there, below which a drop past the end is drawn.
+    Pin {
+        pin: Pin,
+        folder: Option<u64>,
+        slot: usize,
+        last: bool,
+    },
+}
+
+/// The pins grouped the way the sidebar shows them: each folder with its pins, then the pins in
+/// no folder.
+type Grouped = (Vec<(PinFolder, Vec<Pin>)>, Vec<Pin>);
+
 /// The one pinned list, whatever provider each entry came from. Order is kept locally and covers
 /// every entry at once, so a provider that cannot reorder its own pins still follows the drag, and
 /// a streamed pin can sit between two local ones.
@@ -54,9 +86,9 @@ pub struct Pins {
     /// What the provider last reported as pinned, by uri, so only a change since then is
     /// followed.
     mirrored: HashMap<String, Pin>,
-    /// `entries` as last laid out. Cleared whenever the settings, the session or the library
+    /// `rows` as last laid out. Cleared whenever the settings, the session or the library
     /// move, so a frame reads the list without rebuilding it.
-    laid: OnceCell<Rc<Vec<Pin>>>,
+    laid: OnceCell<Rc<Vec<PinRow>>>,
     /// `library` as last laid out, cleared alongside `laid`.
     rest: OnceCell<Rc<Vec<Pin>>>,
     /// The digest of what the shelves last listed, so a library notify that changed nothing
@@ -109,22 +141,50 @@ impl Pins {
         }
     }
 
-    /// Every pin of the live providers, laid out the way the user asked for. The list is built
-    /// once per change and shared afterwards.
-    pub fn entries(&self, cx: &App) -> Rc<Vec<Pin>> {
+    /// The folders and every pin of the live providers, laid out the way the user asked for. A
+    /// closed folder's pins are left out. The list is built once per change and shared
+    /// afterwards.
+    pub fn rows(&self, cx: &App) -> Rc<Vec<PinRow>> {
         self.laid
             .get_or_init(|| {
-                let slugs = self.session.read(cx).active_slugs();
-                let mut pinned = self.settings.read(cx).pinned(&slugs);
-                self.lay_out(&mut pinned, cx);
-                Rc::new(pinned)
+                let (folders, loose) = self.grouped(cx);
+                let mut rows = Vec::new();
+                for (folder, pins) in folders {
+                    let id = folder.id;
+                    let open = folder.open;
+                    rows.push(PinRow::Folder {
+                        folder,
+                        count: pins.len(),
+                    });
+                    if open {
+                        rows.extend(listed(pins, Some(id)));
+                    }
+                }
+                rows.extend(listed(loose, None));
+                Rc::new(rows)
             })
             .clone()
     }
 
+    /// The folders in the order the sidebar shows them.
+    pub fn folders(&self, cx: &App) -> Vec<PinFolder> {
+        self.rows(cx)
+            .iter()
+            .filter_map(|row| match row {
+                PinRow::Folder { folder, .. } => Some(folder.clone()),
+                PinRow::Pin { .. } => None,
+            })
+            .collect()
+    }
+
+    /// The folder `pin` is filed in, if any.
+    pub fn folder_of(&self, pin: &Pin, cx: &App) -> Option<u64> {
+        self.settings.read(cx).folder_of(pin)
+    }
+
     /// Everything the live shelves hold that is not pinned: albums, artists and playlists, laid
     /// out the same way the pins above them are. Nothing else a provider lists belongs here,
-    /// since the sidebar can only open these three. Built once per change, like `entries`.
+    /// since the sidebar can only open these three. Built once per change, like `rows`.
     pub fn library(&self, cx: &App) -> Rc<Vec<Pin>> {
         self.rest
             .get_or_init(|| Rc::new(self.gather_library(cx)))
@@ -192,6 +252,37 @@ impl Pins {
         rest
     }
 
+    /// The folders with their pins, and the pins in none, each laid out the way the user asked
+    /// for. A sort orders the folders by name too.
+    fn grouped(&self, cx: &App) -> Grouped {
+        let slugs = self.session.read(cx).active_slugs();
+        let settings = self.settings.read(cx);
+        let mut folders: Vec<(PinFolder, Vec<Pin>)> = settings
+            .pin_folders()
+            .iter()
+            .map(|folder| (folder.clone(), Vec::new()))
+            .collect();
+        let mut loose = Vec::new();
+        for (folder, pin) in settings.filed(&slugs) {
+            let home = folder.and_then(|id| folders.iter_mut().find(|(held, _)| held.id == id));
+            match home {
+                Some((_, pins)) => pins.push(pin),
+                None => loose.push(pin),
+            }
+        }
+        for (_, pins) in &mut folders {
+            self.lay_out(pins, cx);
+        }
+        self.lay_out(&mut loose, cx);
+        if self.sorted(cx) {
+            folders.sort_by_key(|(folder, _)| folder.name.to_lowercase());
+            if self.reversed(cx) {
+                folders.reverse();
+            }
+        }
+        (folders, loose)
+    }
+
     /// The pins in the order they are stored in, whatever the current sort shows.
     fn dragged(&self, cx: &App) -> Vec<Pin> {
         let slugs = self.session.read(cx).active_slugs();
@@ -251,13 +342,20 @@ impl Pins {
     pub fn toggle(&mut self, pin: Pin, cx: &mut Context<Self>) {
         match self.holds(&pin, cx) {
             true => self.unpin(pin, cx),
-            false => self.place(pin, None, cx),
+            false => self.place(pin, None, None, cx),
         }
     }
 
-    /// Pins at `gap`, a slot counted among the pins already shown, or moves an existing pin there.
-    /// `None` appends, and never moves a pin that is already in the list.
-    pub fn place(&mut self, pin: Pin, gap: Option<usize>, cx: &mut Context<Self>) {
+    /// Pins into `folder` at `gap`, a slot counted among the pins already shown there, or moves an
+    /// existing pin there. No folder means the pins filed in none. `None` appends, and never
+    /// moves a pin that is already in the list.
+    pub fn place(
+        &mut self,
+        pin: Pin,
+        folder: Option<u64>,
+        gap: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(slug) = self.session.read(cx).slug_for(&pin.id) else {
             return;
         };
@@ -269,10 +367,30 @@ impl Pins {
         }
         let slugs = self.session.read(cx).active_slugs();
         self.settings.update(cx, |settings, cx| {
-            settings.pin(slug, pin.clone(), gap, &slugs, cx)
+            settings.pin(slug, pin.clone(), folder, gap, &slugs, cx)
         });
         if !known {
-            self.tell(&pin, true, cx);
+            self.tell(&pin, true, folder, cx);
+        }
+        self.changed(cx);
+    }
+
+    /// Moves `pin` to the end of `folder`, or of the pins in no folder, pinning it first when it
+    /// is not pinned yet.
+    pub fn file(&mut self, pin: Pin, folder: Option<u64>, cx: &mut Context<Self>) {
+        let Some(slug) = self.session.read(cx).slug_for(&pin.id) else {
+            return;
+        };
+        let known = self.holds(&pin, cx);
+        if known && self.folder_of(&pin, cx) == folder {
+            return;
+        }
+        let slugs = self.session.read(cx).active_slugs();
+        self.settings.update(cx, |settings, cx| {
+            settings.pin(slug, pin.clone(), folder, None, &slugs, cx)
+        });
+        if !known {
+            self.tell(&pin, true, folder, cx);
         }
         self.changed(cx);
     }
@@ -281,15 +399,59 @@ impl Pins {
         let Some(slug) = self.session.read(cx).slug_for(&pin.id) else {
             return;
         };
+        let folder = self.folder_of(&pin, cx);
         self.settings
             .update(cx, |settings, cx| settings.unpin(slug, &pin, cx));
-        self.tell(&pin, false, cx);
+        self.tell(&pin, false, folder, cx);
+        self.changed(cx);
+    }
+
+    /// Makes a folder named `name`, and files `pin` in it when one is given.
+    pub fn create_folder(&mut self, name: String, pin: Option<Pin>, cx: &mut Context<Self>) {
+        let id = self
+            .settings
+            .update(cx, |settings, cx| settings.add_pin_folder(name, cx));
+        if let Some(pin) = pin {
+            self.file(pin, Some(id), cx);
+        }
+        self.changed(cx);
+    }
+
+    pub fn rename_folder(&mut self, id: u64, name: String, cx: &mut Context<Self>) {
+        self.settings
+            .update(cx, |settings, cx| settings.rename_pin_folder(id, name, cx));
+        self.changed(cx);
+    }
+
+    /// Drops a folder and leaves its pins pinned, in no folder.
+    pub fn remove_folder(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.settings
+            .update(cx, |settings, cx| settings.remove_pin_folder(id, cx));
+        self.changed(cx);
+    }
+
+    /// Opens a closed folder or closes an open one.
+    pub fn flip_folder(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(open) = self
+            .settings
+            .read(cx)
+            .pin_folders()
+            .iter()
+            .find(|folder| folder.id == id)
+            .map(|folder| folder.open)
+        else {
+            return;
+        };
+        self.settings.update(cx, |settings, cx| {
+            settings.set_pin_folder_open(id, !open, cx)
+        });
         self.changed(cx);
     }
 
     /// Mirrors a change into the provider's own pins. Nothing happens for a provider that keeps
-    /// none, or for an item it does not carry in its library.
-    fn tell(&mut self, pin: &Pin, pinned: bool, cx: &mut Context<Self>) {
+    /// none, or for an item it does not carry in its library. `folder` is where the pin goes back
+    /// to when the provider refuses an unpin.
+    fn tell(&mut self, pin: &Pin, pinned: bool, folder: Option<u64>, cx: &mut Context<Self>) {
         let Some(uri) = self.remote(pin, cx) else {
             return;
         };
@@ -303,7 +465,7 @@ impl Pins {
                     if kept {
                         return;
                     }
-                    mine.update(cx, |this, cx| this.revert(pin, pinned, cx));
+                    mine.update(cx, |this, cx| this.revert(pin, pinned, folder, cx));
                 },
                 cx,
             );
@@ -316,24 +478,31 @@ impl Pins {
         if !self.sorted(cx) {
             return;
         }
-        let shown = self.entries(cx);
+        let (folders, loose) = self.grouped(cx);
+        let order: Vec<u64> = folders.iter().map(|(folder, _)| folder.id).collect();
+        let shown: Vec<Pin> = folders
+            .into_iter()
+            .flat_map(|(_, pins)| pins)
+            .chain(loose)
+            .collect();
         let slugs = self.session.read(cx).active_slugs();
         self.settings.update(cx, |settings, cx| {
             settings.rearrange(&shown, &slugs, cx);
+            settings.order_pin_folders(&order, cx);
             settings.set_sidebar_pin_sort(None, false, cx);
         });
         self.forget();
     }
 
     /// Puts the local list back after the provider refused the change.
-    fn revert(&mut self, pin: Pin, attempted: bool, cx: &mut Context<Self>) {
+    fn revert(&mut self, pin: Pin, attempted: bool, folder: Option<u64>, cx: &mut Context<Self>) {
         let Some(slug) = self.session.read(cx).slug_for(&pin.id) else {
             return;
         };
         let slugs = self.session.read(cx).active_slugs();
         self.settings.update(cx, |settings, cx| match attempted {
             true => settings.unpin(slug, &pin, cx),
-            false => settings.pin(slug, pin, None, &slugs, cx),
+            false => settings.pin(slug, pin, folder, None, &slugs, cx),
         });
         self.changed(cx);
     }
@@ -407,11 +576,24 @@ impl Pins {
                 settings.unpin(slug, &pin, cx);
             }
             for (slug, pin) in arrived {
-                settings.pin(slug, pin, None, &slugs, cx);
+                settings.pin(slug, pin, None, None, &slugs, cx);
             }
         });
         self.changed(cx);
     }
+}
+
+/// `pins` as rows filed under `folder`, each knowing its slot there.
+fn listed(pins: Vec<Pin>, folder: Option<u64>) -> impl Iterator<Item = PinRow> {
+    let count = pins.len();
+    pins.into_iter()
+        .enumerate()
+        .map(move |(slot, pin)| PinRow::Pin {
+            pin,
+            folder,
+            slot,
+            last: slot + 1 == count,
+        })
 }
 
 fn rank(kind: PinKind) -> u8 {

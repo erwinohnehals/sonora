@@ -882,6 +882,20 @@ nav-nothing-pinned = Nothing here
 nav-pins-alphabetical = Alphabetical
 nav-pins-kind = By type
 nav-show-full-library = Show full library
+nav-new-folder = New folder
+nav-folder-count = { $count ->
+    [0] Empty
+    [one] { $count } item
+   *[other] { $count } items
+}
+nav-move-to-folder = Move to folder
+nav-move-out-of-folder = Move out of folder
+nav-rename-folder = Rename folder
+nav-delete-folder = Delete folder
+nav-delete-folder-tip = Its pins stay pinned
+pin-folder-create-title = Create folder
+pin-folder-rename-title = Rename folder
+pin-folder-name-placeholder = Folder name
 nav-return-top = Back to top
 
 # trouble
