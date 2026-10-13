@@ -11,6 +11,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Group your pins into folders in the sidebar. Make one from the pinned section's menu or from a
   pin's Move to folder menu, then drag pins onto it. Deleting a folder keeps its pins pinned.
+- Right-click a local song and pick Show in File Explorer (Finder on macOS) to open its folder with
+  the file selected.
 
 ## [0.42.2] - 2026-10-07
 
