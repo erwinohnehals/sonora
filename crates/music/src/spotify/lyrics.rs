@@ -8,7 +8,7 @@ use librespot_core::{Session, spclient::CLIENT_TOKEN};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-use super::{auth, search};
+use super::{auth, quota, search};
 use crate::lyrics::{catalog, lrc};
 use crate::{
     Lyrics, LyricsHit, LyricsLine, LyricsProvider, LyricsQuery, LyricsWord, Voice, escape,
@@ -152,22 +152,25 @@ pub async fn lyrics(session: &Session, track_id: &str) -> Result<Option<Lyrics>>
         .client_token()
         .await
         .context("cannot obtain Spotify client token")?;
-    let request = Request::builder()
-        .method(Method::GET)
-        .uri(format!(
-            "{ENDPOINT}/{}?format=json&vocalRemoval=false&market=from_token",
-            escape::component(track_id)
-        ))
-        .header(header::ACCEPT, "application/json")
-        .header("app-platform", APP_PLATFORM)
-        .header(
-            header::AUTHORIZATION,
-            format!("{} {}", token.token_type, token.access_token),
-        )
-        .header(CLIENT_TOKEN, client_token)
-        .body(Bytes::new())
-        .context("cannot build the Spotify lyrics request")?;
-    let body = match session.http_client().request_body(request).await {
+    let uri = &format!(
+        "{ENDPOINT}/{}?format=json&vocalRemoval=false&market=from_token",
+        escape::component(track_id)
+    );
+    let authorization = &format!("{} {}", token.token_type, token.access_token);
+    let client_token = &client_token;
+    let answer = quota::patient(|| async move {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header(header::ACCEPT, "application/json")
+            .header("app-platform", APP_PLATFORM)
+            .header(header::AUTHORIZATION, authorization)
+            .header(CLIENT_TOKEN, client_token)
+            .body(Bytes::new())?;
+        session.http_client().request_body(request).await
+    })
+    .await;
+    let body = match answer {
         Ok(body) => body,
         Err(error) => {
             log::debug!("lyrics: spotify has none for {track_id}: {error}");

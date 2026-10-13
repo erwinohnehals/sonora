@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow};
+use futures::stream::{self, StreamExt as _};
 use http::Method;
 use librespot_core::{Session, SpotifyId};
 use librespot_protocol::playlist4_external::{
@@ -10,9 +11,8 @@ use librespot_protocol::playlist4_external::{
     SourceInfo, UpdateItemAttributes, UpdateListAttributes, op::Kind, source_info::Client,
 };
 use protobuf::{Message as _, MessageField};
-use tokio::task::JoinSet;
 
-use crate::spotify::{collection, profiles, wire};
+use crate::spotify::{collection, profiles, quota, wire};
 use crate::{Contributor, GenreItem, GenreSection, Playlist, PlaylistDetail, Track, escape};
 
 const TRACK_PREFIX: &str = "spotify:track:";
@@ -185,15 +185,16 @@ pub async fn name_blanks(session: &Session, sections: &mut Vec<GenreSection>) {
         return;
     }
 
-    let mut pending = JoinSet::new();
-    for id in blanks {
-        let session = session.clone();
-        pending.spawn(async move { (id.clone(), header(&session, &id).await.ok()) });
-    }
+    let mut pending = stream::iter(blanks)
+        .map(|id| async move {
+            let playlist = header(session, &id).await.ok();
+            (id, playlist)
+        })
+        .buffer_unordered(quota::FAN_OUT);
 
     let mut found = HashMap::new();
-    while let Some(joined) = pending.join_next().await {
-        if let Ok((id, Some(playlist))) = joined {
+    while let Some((id, playlist)) = pending.next().await {
+        if let Some(playlist) = playlist {
             found.insert(id, playlist);
         }
     }
@@ -294,18 +295,16 @@ pub async fn modified(session: &Session, ids: Vec<String>) -> HashMap<String, i6
         );
     }
 
-    let mut pending = JoinSet::new();
-    for id in ids.into_iter().take(wanted) {
-        let session = session.clone();
-        pending.spawn(async move {
-            let stamp = stamp(&session, &id).await;
+    let mut pending = stream::iter(ids.into_iter().take(wanted))
+        .map(|id| async move {
+            let stamp = stamp(session, &id).await;
             (id, stamp)
-        });
-    }
+        })
+        .buffer_unordered(quota::FAN_OUT);
 
     let mut stamps = HashMap::new();
-    while let Some(joined) = pending.join_next().await {
-        if let Ok((id, Some(stamp))) = joined {
+    while let Some((id, stamp)) = pending.next().await {
+        if let Some(stamp) = stamp {
             stamps.insert(id, stamp);
         }
     }
@@ -317,14 +316,16 @@ async fn stamp(session: &Session, playlist_id: &str) -> Option<i64> {
         "/playlist/v2/playlist/{}?from=0&length=0",
         escape::component(playlist_id)
     );
-    let body = session
-        .spclient()
-        .request(&Method::GET, &endpoint, None, None)
-        .await
-        .inspect_err(|error| {
-            log::debug!("playlists: cannot read the metadata of {playlist_id}: {error}")
-        })
-        .ok()?;
+    let body = quota::patient(|| {
+        session
+            .spclient()
+            .request(&Method::GET, &endpoint, None, None)
+    })
+    .await
+    .inspect_err(|error| {
+        log::debug!("playlists: cannot read the metadata of {playlist_id}: {error}")
+    })
+    .ok()?;
 
     let content = SelectedListContent::parse_from_bytes(&body).ok()?;
     wire::seconds(content.timestamp())
@@ -332,9 +333,7 @@ async fn stamp(session: &Session, playlist_id: &str) -> Option<i64> {
 
 async fn snapshot(session: &Session, playlist_id: &str) -> Result<SelectedListContent> {
     let id = SpotifyId::from_base62(playlist_id).context("cannot read the playlist id")?;
-    let body = session
-        .spclient()
-        .get_playlist(&id)
+    let body = quota::patient(|| session.spclient().get_playlist(&id))
         .await
         .context("cannot read the playlist")?;
 
@@ -357,10 +356,12 @@ pub async fn rootlist_page(session: &Session, from: usize, length: usize) -> Res
         "/playlist/v2/user/{}/rootlist?decorate=revision,attributes,length,owner,capabilities,status_code&from={from}&length={length}",
         escape::component(&session.username())
     );
-    let reply = session
-        .spclient()
-        .request(&Method::GET, &endpoint, None, None)
-        .await?;
+    let reply = quota::patient(|| {
+        session
+            .spclient()
+            .request(&Method::GET, &endpoint, None, None)
+    })
+    .await?;
     Ok(reply.to_vec())
 }
 
@@ -388,10 +389,12 @@ async fn rootlist_edit(session: &Session, body: &ListChanges) -> Result<Vec<u8>>
 }
 
 async fn post(session: &Session, endpoint: &str, body: &ListChanges) -> Result<Vec<u8>> {
-    let reply = session
-        .spclient()
-        .request_with_protobuf(&Method::POST, endpoint, None, body)
-        .await?;
+    let reply = quota::patient(|| {
+        session
+            .spclient()
+            .request_with_protobuf(&Method::POST, endpoint, None, body)
+    })
+    .await?;
     Ok(reply.to_vec())
 }
 

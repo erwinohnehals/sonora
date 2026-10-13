@@ -8,7 +8,8 @@ use librespot_protocol::playlist4_external::SelectedListContent as RootList;
 use protobuf::Message as _;
 
 use crate::spotify::{
-    albums, artists, collection, collection2, pathfinder, playlists, profiles, radio, search, wire,
+    albums, artists, collection, collection2, pathfinder, playlists, profiles, quota, radio,
+    search, wire,
 };
 use crate::{
     Album, AlbumCatalogue, AlbumDetail, Artist, ArtistCatalogue, ArtistProfile, Genre, GenreDetail,
@@ -34,13 +35,15 @@ impl LibrespotClient {
     /// The account's own display name, or `None` when the lookup fails. Signing in calls this,
     /// so a profile Spotify will not hand over must not take the session down with it.
     async fn display_name(&self, username: &str) -> Option<String> {
-        let body = self
-            .session
-            .spclient()
-            .get_user_profile(&escape::component(username), None, None)
-            .await
-            .inspect_err(|error| log::debug!("profiles: cannot read {username}: {error}"))
-            .ok()?;
+        let escaped = escape::component(username);
+        let body = quota::patient(|| {
+            self.session
+                .spclient()
+                .get_user_profile(&escaped, None, None)
+        })
+        .await
+        .inspect_err(|error| log::debug!("profiles: cannot read {username}: {error}"))
+        .ok()?;
 
         let profile: wire::Named = serde_json::from_slice(&body).ok()?;
         profile.label().map(str::to_owned)

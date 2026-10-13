@@ -5,6 +5,8 @@ use librespot_core::{Session, spclient::CLIENT_TOKEN};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
+use crate::spotify::quota;
+
 mod album;
 mod artist;
 mod browse;
@@ -85,25 +87,24 @@ async fn send<T: DeserializeOwned>(
         .client_token()
         .await
         .context("cannot obtain Spotify client token")?;
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri(ENDPOINT)
-        .header(header::ACCEPT, "application/json")
-        .header(header::CONTENT_TYPE, "application/json")
-        .header("app-platform", APP_PLATFORM)
-        .header("spotify-app-version", APP_VERSION)
-        .header(
-            header::AUTHORIZATION,
-            format!("{} {}", token.token_type, token.access_token),
-        )
-        .header(CLIENT_TOKEN, client_token)
-        .body(Bytes::from(body))
-        .with_context(|| format!("cannot build {operation} Pathfinder request"))?;
-    let body = session
-        .http_client()
-        .request_body(request)
-        .await
-        .with_context(|| format!("cannot request {operation} from Pathfinder"))?;
+    let authorization = &format!("{} {}", token.token_type, token.access_token);
+    let client_token = &client_token;
+    let body = &Bytes::from(body);
+    let body = quota::patient(|| async move {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(ENDPOINT)
+            .header(header::ACCEPT, "application/json")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("app-platform", APP_PLATFORM)
+            .header("spotify-app-version", APP_VERSION)
+            .header(header::AUTHORIZATION, authorization)
+            .header(CLIENT_TOKEN, client_token)
+            .body(body.clone())?;
+        session.http_client().request_body(request).await
+    })
+    .await
+    .with_context(|| format!("cannot request {operation} from Pathfinder"))?;
     decoded(&body, operation)
 }
 

@@ -11,6 +11,7 @@ mod pb;
 mod playback;
 mod playlists;
 mod profiles;
+mod quota;
 mod radio;
 mod search;
 mod sink;

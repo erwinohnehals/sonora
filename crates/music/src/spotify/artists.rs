@@ -9,7 +9,7 @@ use librespot_protocol::metadata::{Artist as ArtistMessage, Image};
 use protobuf::{EnumOrUnknown, Message as _};
 
 use crate::spotify::collection2::SavedItem;
-use crate::spotify::{albums, collection, collection2, pathfinder, wire};
+use crate::spotify::{albums, collection, collection2, pathfinder, quota, wire};
 use crate::{Album, Artist, ArtistCatalogue, ArtistProfile, ReleaseType, SavedArtist, Track};
 
 const ARTIST_PREFIX: &str = "spotify:artist:";
@@ -192,9 +192,7 @@ fn newest_first(releases: impl Iterator<Item = Album>) -> Vec<Album> {
 async fn metadata(session: &Session, artist_id: &str) -> Result<ArtistMessage> {
     let uri = SpotifyUri::from_uri(&format!("{ARTIST_PREFIX}{artist_id}"))
         .context("invalid artist ID")?;
-    let body = session
-        .spclient()
-        .get_artist_metadata(&uri)
+    let body = quota::patient(|| session.spclient().get_artist_metadata(&uri))
         .await
         .context("cannot read artist metadata")?;
     ArtistMessage::parse_from_bytes(&body).context("cannot decode artist metadata protobuf")
@@ -260,9 +258,7 @@ async fn cards(session: &Session, ids: &[String]) -> Result<HashMap<String, Save
         ..Default::default()
     };
 
-    let response = session
-        .spclient()
-        .get_extended_metadata(request)
+    let response = quota::patient(|| session.spclient().get_extended_metadata(request.clone()))
         .await
         .context("cannot read artist portraits")?;
 

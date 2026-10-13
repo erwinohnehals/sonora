@@ -17,6 +17,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spreadsheet per list and a `library.json` with every track's title, artists, album, ISRC, date
   added and link, so you keep a record of your library outside the service.
 
+### Fixed
+
+- A large Spotify library no longer leaves your songs and albums empty after launch. Sonora now
+  waits a moment and retries when Spotify asks it to slow down, instead of giving up.
+
 ## [0.42.2] - 2026-10-07
 
 ### Added

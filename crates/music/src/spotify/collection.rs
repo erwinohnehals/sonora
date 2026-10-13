@@ -12,7 +12,7 @@ use librespot_protocol::metadata::{
 };
 use protobuf::{EnumOrUnknown, Message as _};
 
-use crate::spotify::{collection2, wire};
+use crate::spotify::{collection2, quota, wire};
 use crate::{ArtistRef, Credit, Track};
 
 const TRACK_PREFIX: &str = "spotify:track:";
@@ -102,7 +102,8 @@ pub(crate) async fn batched(
                 .collect(),
             ..Default::default()
         };
-        let response = session.spclient().get_extended_metadata(request).await?;
+        let response =
+            quota::patient(|| session.spclient().get_extended_metadata(request.clone())).await?;
         take(
             response
                 .extended_metadata
