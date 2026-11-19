@@ -188,6 +188,9 @@ menu-remove-tracks-from-history = { $count ->
 }
 menu-delete-track-file = Delete track file
 menu-delete-track-files = Delete { $count } track files
+menu-show-in-explorer = Show in File Explorer
+menu-show-in-finder = Show in Finder
+menu-show-in-folder = Show in folder
 menu-download = Download
 menu-remove-download = Remove download
 menu-downloading = Downloading. Click to stop

@@ -479,6 +479,18 @@ impl ItemMenu {
                 .on_click(move |_, window, cx| TagEditor::open(track.clone(), window, cx))
         });
 
+        let reveal = match (many, track.id.as_deref().and_then(music::local_track_path)) {
+            (false, Some(path)) => {
+                let path = path.to_path_buf();
+                Some(
+                    MenuItem::new("show-in-folder", show_in_folder())
+                        .icon("icons/folder-open.svg")
+                        .on_click(move |_, _, cx| cx.reveal_path(&path)),
+                )
+            }
+            _ => None,
+        };
+
         let delete_files = imported.then(|| {
             let ids = ids.clone();
             MenuItem::new(
@@ -516,6 +528,7 @@ impl ItemMenu {
                 details
                     .into_iter()
                     .chain(edit)
+                    .chain(reveal)
                     .chain(copy)
                     .chain(delete_files)
                     .collect(),
@@ -1540,4 +1553,22 @@ pub(crate) fn new_playlist_menu(
 enum Saved {
     Album(Album),
     Playlist(Playlist),
+}
+
+/// The label for revealing a file, named after the platform's own file manager.
+#[cfg(target_os = "windows")]
+fn show_in_folder() -> SharedString {
+    t!("menu-show-in-explorer")
+}
+
+/// The label for revealing a file, named after the platform's own file manager.
+#[cfg(target_os = "macos")]
+fn show_in_folder() -> SharedString {
+    t!("menu-show-in-finder")
+}
+
+/// The label for revealing a file, named after the platform's own file manager.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn show_in_folder() -> SharedString {
+    t!("menu-show-in-folder")
 }

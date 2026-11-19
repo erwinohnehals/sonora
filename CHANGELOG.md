@@ -7,6 +7,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Right-click a local song and pick Show in File Explorer (Finder on macOS) to open its folder with
+  the file selected.
+
 ### Fixed
 
 - Your YouTube Music library lists every artist you follow, not only the first couple dozen.

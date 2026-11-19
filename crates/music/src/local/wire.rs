@@ -78,7 +78,7 @@ pub fn track_id(path: &Path) -> String {
 }
 
 pub fn path_from_track_id(id: &str) -> Option<&Path> {
-    id.strip_prefix(LOCAL_TRACK_PREFIX).map(Path::new)
+    crate::local_track_path(id)
 }
 
 /// Byte offset where a leading ID3v2 tag ends, or 0 if `path` doesn't start with one.
