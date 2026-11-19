@@ -5,8 +5,10 @@ use gpui::{
 };
 use i18n::t;
 use music::Playlist;
-use state::{Addition, CoverEdit, Leaving, Outcome, Shelf, Sonora, Toasts, cover_problem};
-use ui::{ActiveTheme as _, Artwork, Button, Modal, PinKind, TabBar};
+use state::{
+    Addition, CoverEdit, Leaving, Outcome, PinFolder, Shelf, Sonora, Toasts, cover_problem,
+};
+use ui::{ActiveTheme as _, Artwork, Button, Modal, Pin, PinKind, TabBar};
 use ui::{Dismiss, FORM_CONTEXT, Field, Form, Input, Submit};
 
 #[derive(Clone)]
@@ -23,8 +25,13 @@ pub(crate) enum Edit {
         track: String,
         leaving: Option<Leaving>,
     },
+    /// Names a new folder of pins, and files the pin in it when one is given.
+    CreateFolder(Option<Pin>),
+    RenameFolder(PinFolder),
 }
 
+/// The dialog that creates, edits and deletes playlists, and names the folders of the pinned
+/// list.
 pub(crate) struct PlaylistEditor {
     edit: Option<Edit>,
     name: Entity<Input>,
@@ -63,12 +70,20 @@ impl PlaylistEditor {
     fn show(&mut self, edit: Edit, window: &mut Window, cx: &mut Context<Self>) {
         let name = match &edit {
             Edit::Details(playlist) => playlist.name.clone(),
+            Edit::RenameFolder(folder) => folder.name.clone(),
             _ => String::new(),
+        };
+        let hint = match &edit {
+            Edit::CreateFolder(_) | Edit::RenameFolder(_) => "pin-folder-name-placeholder",
+            _ => "playlist-name-placeholder",
         };
         self.restore = window.focused(cx);
         self.cover = CoverEdit::Keep;
         self.picking = None;
-        self.name.update(cx, |input, cx| input.set_text(name, cx));
+        self.name.update(cx, |input, cx| {
+            input.set_text(name, cx);
+            input.set_hint(hint, cx);
+        });
         match plain(&edit) {
             true => window.focus(&self.focus, cx),
             false => self.name.update(cx, |input, cx| input.focus(window, cx)),
@@ -158,6 +173,7 @@ impl PlaylistEditor {
         }
         let name = self.name.read(cx).text().trim().to_owned();
         let library = Sonora::global(cx).library.clone();
+        let pins = Sonora::global(cx).pins.clone();
 
         match edit {
             Edit::Create { addition, shelf } if !name.is_empty() => {
@@ -183,6 +199,12 @@ impl PlaylistEditor {
                 Some(leaving) => library.move_to_playlist(playlist.id, track, leaving, cx),
                 None => library.add_to_playlist(playlist.id, track, cx),
             }),
+            Edit::CreateFolder(pin) if !name.is_empty() => {
+                pins.update(cx, |pins, cx| pins.create_folder(name, pin, cx))
+            }
+            Edit::RenameFolder(folder) if !name.is_empty() && name != folder.name => {
+                pins.update(cx, |pins, cx| pins.rename_folder(folder.id, name, cx))
+            }
             _ => {}
         }
         cx.notify();
@@ -316,6 +338,8 @@ impl Render for PlaylistEditor {
             Edit::Details(_) => t!("playlist-edit-title"),
             Edit::Delete(_) => t!("playlist-delete-title"),
             Edit::Again { .. } => t!("playlist-again-title"),
+            Edit::CreateFolder(_) => t!("pin-folder-create-title"),
+            Edit::RenameFolder(_) => t!("pin-folder-rename-title"),
         };
         // A blank new playlist can come from an M3U file instead, which the local shelf reads.
         let import =

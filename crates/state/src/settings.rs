@@ -39,7 +39,7 @@ use ui::{
 
 use self::equalizer::Profile;
 use crate::equalizer::DeviceRule;
-use crate::pins::PinSort;
+use crate::pins::{PinFolder, PinSort};
 use crate::queue::{Resume, gap_target};
 use crate::updates::{Channel, updates_itself};
 use crate::{Hit, Outcome, Repeat, Sonora, Toasts};
@@ -366,13 +366,16 @@ pub const LYRICS_SOURCES: [&str; 10] = [
     "NetEase",
 ];
 
-/// A pin together with the provider it belongs to. The pin is flattened so the stored JSON
-/// reads as a pin with one extra `slug` key.
+/// A pin together with the provider it belongs to and the folder it is filed in. The pin is
+/// flattened so the stored JSON reads as a pin with an extra `slug` key, and `folder` only
+/// appears once the pin is filed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Held {
     slug: String,
     #[serde(flatten)]
     pin: Pin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    folder: Option<u64>,
 }
 
 /// A search result the listener chose, with the provider it belongs to.
@@ -828,6 +831,8 @@ struct StateValues {
     filters: HashMap<String, HashMap<String, FilterValue>>,
     views: HashMap<String, Mode>,
     pinned: Vec<Held>,
+    /// The folders of the pinned list, in the order they were made or last laid out in.
+    pin_folders: Vec<PinFolder>,
     sidebar_pinned_open: bool,
     sidebar_full_library: bool,
     sidebar_pin_sort: String,
@@ -861,6 +866,7 @@ impl Default for StateValues {
             filters: HashMap::new(),
             views: HashMap::new(),
             pinned: Vec::new(),
+            pin_folders: Vec::new(),
             sidebar_pinned_open: false,
             sidebar_full_library: false,
             sidebar_pin_sort: String::new(),
@@ -2136,6 +2142,136 @@ impl AppSettings {
         gather(&self.state.pinned, slugs)
     }
 
+    /// The pins of the given providers in stored order, each with the folder it is filed in.
+    /// A folder that no longer exists reads as none.
+    pub fn filed(&self, slugs: &[&str]) -> Vec<(Option<u64>, Pin)> {
+        shown(&self.state.pinned, slugs)
+            .map(|(_, held)| (self.folder(held.folder), held.pin.clone()))
+            .collect()
+    }
+
+    /// The folder `pin` is filed in, if it is pinned and filed at all.
+    pub fn folder_of(&self, pin: &Pin) -> Option<u64> {
+        let held = self.state.pinned.iter().find(|held| held.pin.same(pin))?;
+        self.folder(held.folder)
+    }
+
+    /// The pinned list's folders, in stored order.
+    pub fn pin_folders(&self) -> &[PinFolder] {
+        &self.state.pin_folders
+    }
+
+    /// Makes an open, empty folder after the others and returns its id.
+    pub fn add_pin_folder(&mut self, name: String, cx: &mut Context<Self>) -> u64 {
+        let id = self
+            .state
+            .pin_folders
+            .iter()
+            .map(|folder| folder.id + 1)
+            .max()
+            .unwrap_or(1);
+        self.state.pin_folders.push(PinFolder {
+            id,
+            name,
+            open: true,
+        });
+        self.schedule_state_save(cx);
+        id
+    }
+
+    pub fn rename_pin_folder(&mut self, id: u64, name: String, cx: &mut Context<Self>) {
+        let Some(folder) = self.state.pin_folders.iter_mut().find(|held| held.id == id) else {
+            return;
+        };
+        if folder.name == name {
+            return;
+        }
+        folder.name = name;
+        self.schedule_state_save(cx);
+    }
+
+    pub fn set_pin_folder_open(&mut self, id: u64, open: bool, cx: &mut Context<Self>) {
+        let Some(folder) = self.state.pin_folders.iter_mut().find(|held| held.id == id) else {
+            return;
+        };
+        if folder.open == open {
+            return;
+        }
+        folder.open = open;
+        self.schedule_state_save(cx);
+    }
+
+    /// Drops a folder and returns it with its slot among the folders and the pins it held, so
+    /// an Undo can put it back. Its pins stay pinned, in no folder, where they already were in
+    /// the stored order.
+    pub fn remove_pin_folder(
+        &mut self,
+        id: u64,
+        cx: &mut Context<Self>,
+    ) -> Option<(PinFolder, usize, Vec<Pin>)> {
+        let slot = self
+            .state
+            .pin_folders
+            .iter()
+            .position(|folder| folder.id == id)?;
+        let folder = self.state.pin_folders.remove(slot);
+        let mut held = Vec::new();
+        for entry in &mut self.state.pinned {
+            if entry.folder == Some(id) {
+                entry.folder = None;
+                held.push(entry.pin.clone());
+            }
+        }
+        self.schedule_state_save(cx);
+        Some((folder, slot, held))
+    }
+
+    /// Puts back a folder `remove_pin_folder` took out, at its old slot, with those of `pins`
+    /// that are still pinned and have not been filed elsewhere since.
+    pub fn restore_pin_folder(
+        &mut self,
+        folder: PinFolder,
+        slot: usize,
+        pins: &[Pin],
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .state
+            .pin_folders
+            .iter()
+            .any(|held| held.id == folder.id)
+        {
+            return;
+        }
+        let id = folder.id;
+        let slot = slot.min(self.state.pin_folders.len());
+        self.state.pin_folders.insert(slot, folder);
+        for entry in &mut self.state.pinned {
+            if entry.folder.is_none() && pins.iter().any(|pin| pin.same(&entry.pin)) {
+                entry.folder = Some(id);
+            }
+        }
+        self.schedule_state_save(cx);
+    }
+
+    /// Puts the folders in `order`, by id. A folder `order` leaves out keeps its place after the
+    /// ones it names.
+    pub fn order_pin_folders(&mut self, order: &[u64], cx: &mut Context<Self>) {
+        let rank = |id: u64| {
+            order
+                .iter()
+                .position(|held| *held == id)
+                .unwrap_or(order.len())
+        };
+        self.state.pin_folders.sort_by_key(|folder| rank(folder.id));
+        self.schedule_state_save(cx);
+    }
+
+    /// `folder` if it still exists.
+    fn folder(&self, folder: Option<u64>) -> Option<u64> {
+        folder.filter(|id| self.state.pin_folders.iter().any(|held| held.id == *id))
+    }
+
     pub fn resume(&self) -> Option<&Resume> {
         self.state.resume.as_ref()
     }
@@ -2165,17 +2301,34 @@ impl AppSettings {
         self.save_state_quietly(cx);
     }
 
-    /// Pins at `gap`, a slot counted among the pins of the providers in `slugs`. An existing pin
-    /// moves instead of duplicating, and nothing is saved when it already sits there.
+    /// Pins into `folder` at `gap`, a slot counted among that folder's pins of the providers in
+    /// `slugs`, where no folder means the pins filed in none. An existing pin moves instead of
+    /// duplicating, and nothing is saved when it already sits there.
     pub fn pin(
         &mut self,
         slug: &str,
         pin: Pin,
+        folder: Option<u64>,
         gap: Option<usize>,
         slugs: &[&str],
         cx: &mut Context<Self>,
     ) {
-        if !place(&mut self.state.pinned, slug, pin, gap, slugs) {
+        let folder = self.folder(folder);
+        let filed: Vec<Option<u64>> = self
+            .state
+            .pinned
+            .iter()
+            .map(|held| self.folder(held.folder))
+            .collect();
+        if !place(
+            &mut self.state.pinned,
+            &filed,
+            slug,
+            pin,
+            folder,
+            gap,
+            slugs,
+        ) {
             return;
         }
         self.schedule_state_save(cx);
@@ -3282,10 +3435,22 @@ fn carry(previous: Option<&Resume>, next: &mut Resume) {
         .map_or(0., |old| old.position);
 }
 
-/// Inserts or moves `pin` into the `gap`th slot among the pins of `slugs`. `None` or a gap past
-/// the end means the end. Returns false when nothing moved.
-fn place(pinned: &mut Vec<Held>, slug: &str, pin: Pin, gap: Option<usize>, slugs: &[&str]) -> bool {
-    let visible: Vec<usize> = shown(pinned, slugs).map(|(index, _)| index).collect();
+/// Inserts or moves `pin` into `folder`, at the `gap`th slot among that folder's pins of
+/// `slugs`. `filed` is the folder each stored pin reads as, so a pin whose folder is gone counts
+/// as in none. `None` or a gap past the end means the end. Returns false when nothing moved.
+fn place(
+    pinned: &mut Vec<Held>,
+    filed: &[Option<u64>],
+    slug: &str,
+    pin: Pin,
+    folder: Option<u64>,
+    gap: Option<usize>,
+    slugs: &[&str],
+) -> bool {
+    let visible: Vec<usize> = shown(pinned, slugs)
+        .filter(|(index, _)| filed.get(*index).copied().flatten() == folder)
+        .map(|(index, _)| index)
+        .collect();
     let gap = gap.unwrap_or(visible.len()).min(visible.len());
     let target = match gap {
         0 => visible.first().copied().unwrap_or(pinned.len()),
@@ -3298,14 +3463,17 @@ fn place(pinned: &mut Vec<Held>, slug: &str, pin: Pin, gap: Option<usize>, slugs
             Held {
                 slug: slug.to_owned(),
                 pin,
+                folder,
             },
         );
         return true;
     };
 
+    let refiled = filed.get(from).copied().flatten() != folder;
+    pinned[from].folder = folder;
     let to = gap_target(from, target, pinned.len());
     if to == from {
-        return false;
+        return refiled;
     }
 
     let moved = pinned.remove(from);
@@ -3668,6 +3836,7 @@ mod tests {
         Held {
             slug: slug.to_owned(),
             pin: pin(id),
+            folder: None,
         }
     }
 
@@ -3714,7 +3883,15 @@ mod tests {
     fn a_fresh_pin_lands_at_the_gap() {
         let mut pinned = vec![held("spotify", "a"), held("spotify", "b")];
 
-        assert!(place(&mut pinned, "spotify", pin("c"), Some(1), &SLUGS));
+        assert!(place(
+            &mut pinned,
+            &[None; 3],
+            "spotify",
+            pin("c"),
+            None,
+            Some(1),
+            &SLUGS
+        ));
         assert_eq!(ids(&pinned), ["a", "c", "b"]);
     }
 
@@ -3722,7 +3899,15 @@ mod tests {
     fn no_gap_appends() {
         let mut pinned = vec![held("spotify", "a")];
 
-        assert!(place(&mut pinned, "spotify", pin("b"), None, &SLUGS));
+        assert!(place(
+            &mut pinned,
+            &[None; 3],
+            "spotify",
+            pin("b"),
+            None,
+            None,
+            &SLUGS
+        ));
         assert_eq!(ids(&pinned), ["a", "b"]);
     }
 
@@ -3730,7 +3915,15 @@ mod tests {
     fn a_gap_past_the_end_still_appends() {
         let mut pinned = vec![held("spotify", "a")];
 
-        assert!(place(&mut pinned, "spotify", pin("b"), Some(9), &SLUGS));
+        assert!(place(
+            &mut pinned,
+            &[None; 3],
+            "spotify",
+            pin("b"),
+            None,
+            Some(9),
+            &SLUGS
+        ));
         assert_eq!(ids(&pinned), ["a", "b"]);
     }
 
@@ -3742,7 +3935,15 @@ mod tests {
             held("spotify", "c"),
         ];
 
-        assert!(place(&mut pinned, "spotify", pin("a"), Some(3), &SLUGS));
+        assert!(place(
+            &mut pinned,
+            &[None; 3],
+            "spotify",
+            pin("a"),
+            None,
+            Some(3),
+            &SLUGS
+        ));
         assert_eq!(ids(&pinned), ["b", "c", "a"]);
     }
 
@@ -3754,7 +3955,15 @@ mod tests {
             held("spotify", "c"),
         ];
 
-        assert!(place(&mut pinned, "spotify", pin("c"), Some(0), &SLUGS));
+        assert!(place(
+            &mut pinned,
+            &[None; 3],
+            "spotify",
+            pin("c"),
+            None,
+            Some(0),
+            &SLUGS
+        ));
         assert_eq!(ids(&pinned), ["c", "a", "b"]);
     }
 
@@ -3766,8 +3975,24 @@ mod tests {
             held("spotify", "c"),
         ];
 
-        assert!(!place(&mut pinned, "spotify", pin("b"), Some(1), &SLUGS));
-        assert!(!place(&mut pinned, "spotify", pin("b"), Some(2), &SLUGS));
+        assert!(!place(
+            &mut pinned,
+            &[None; 3],
+            "spotify",
+            pin("b"),
+            None,
+            Some(1),
+            &SLUGS
+        ));
+        assert!(!place(
+            &mut pinned,
+            &[None; 3],
+            "spotify",
+            pin("b"),
+            None,
+            Some(2),
+            &SLUGS
+        ));
         assert_eq!(ids(&pinned), ["a", "b", "c"]);
     }
 
@@ -3777,8 +4002,10 @@ mod tests {
 
         assert!(place(
             &mut pinned,
+            &[None],
             "spotify",
             Pin::new(PinKind::Song, "x", "x"),
+            None,
             None,
             &SLUGS
         ));

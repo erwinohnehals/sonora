@@ -71,7 +71,7 @@ pub use music::connect::{Elsewhere, Repeat};
 pub use network::{Network, Reconnected};
 pub use outputs::Outputs;
 pub use overload::OutputLevel;
-pub use pins::{PinSort, Pins};
+pub use pins::{PinFolder, PinRow, PinSort, Pins};
 pub use playback::{
     Origin, Playback, PlaybackState, PositionTick, Sleep, Unreachable, VOLUME_STEP, Whence,
 };
