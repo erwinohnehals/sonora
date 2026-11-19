@@ -5,6 +5,7 @@ use anyhow::{Context as _, Result, anyhow};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
+use futures::stream::{self, StreamExt as _};
 use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use http::{HeaderMap, HeaderValue, Method, Request};
 use librespot_core::spclient::CLIENT_TOKEN;
@@ -437,18 +438,16 @@ pub async fn modified(session: &Session, ids: Vec<String>) -> HashMap<String, i6
         );
     }
 
-    let mut pending = JoinSet::new();
-    for id in ids.into_iter().take(wanted) {
-        let session = session.clone();
-        pending.spawn(async move {
-            let stamp = stamp(&session, &id).await;
+    let mut pending = stream::iter(ids.into_iter().take(wanted))
+        .map(|id| async move {
+            let stamp = stamp(session, &id).await;
             (id, stamp)
-        });
-    }
+        })
+        .buffer_unordered(pace::FAN_OUT);
 
     let mut stamps = HashMap::new();
-    while let Some(joined) = pending.join_next().await {
-        if let Ok((id, Some(stamp))) = joined {
+    while let Some((id, stamp)) = pending.next().await {
+        if let Some(stamp) = stamp {
             stamps.insert(id, stamp);
         }
     }
@@ -460,14 +459,16 @@ async fn stamp(session: &Session, playlist_id: &str) -> Option<i64> {
         "/playlist/v2/playlist/{}?from=0&length=0",
         escape::component(playlist_id)
     );
-    let body = session
-        .spclient()
-        .request(&Method::GET, &endpoint, None, None)
-        .await
-        .inspect_err(|error| {
-            log::debug!("playlists: cannot read the metadata of {playlist_id}: {error}")
-        })
-        .ok()?;
+    let body = paced(|| {
+        session
+            .spclient()
+            .request(&Method::GET, &endpoint, None, None)
+    })
+    .await
+    .inspect_err(|error| {
+        log::debug!("playlists: cannot read the metadata of {playlist_id}: {error}")
+    })
+    .ok()?;
 
     let content = SelectedListContent::parse_from_bytes(&body).ok()?;
     wire::seconds(content.timestamp())

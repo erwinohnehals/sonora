@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context as _, Result};
+use futures::stream::{self, StreamExt as _};
 use librespot_core::Session;
 use serde::Deserialize;
-use tokio::task::JoinSet;
 
+use crate::spotify::pace::{self, paced};
 use crate::spotify::wire;
 use crate::{Contributor, Playlist, UserDetail, UserProfile, escape};
 
@@ -90,18 +91,16 @@ pub async fn own(session: &Session) -> UserProfile {
 }
 
 pub async fn contributors(session: &Session, ids: HashSet<String>) -> HashMap<String, Contributor> {
-    let mut pending = JoinSet::new();
-    for id in ids {
-        let session = session.clone();
-        pending.spawn(async move {
-            let found = fetch(&session, &id, 0).await;
+    let mut pending = stream::iter(ids)
+        .map(|id| async move {
+            let found = fetch(session, &id, 0).await;
             (id, found)
-        });
-    }
+        })
+        .buffer_unordered(pace::FAN_OUT);
 
     let mut known = HashMap::new();
-    while let Some(joined) = pending.join_next().await {
-        let Ok((id, Some(found))) = joined else {
+    while let Some(joined) = pending.next().await {
+        let (id, Some(found)) = joined else {
             continue;
         };
         known.insert(
@@ -146,18 +145,14 @@ async fn counts(session: &Session, username: &str, found: &Profile) -> (Option<u
 
 async fn circle(session: &Session, username: &str, followers: bool) -> Option<u64> {
     let client = session.spclient();
-    let body = match followers {
-        true => {
-            client
-                .get_user_followers(&escape::component(username))
-                .await
+    let escaped = &escape::component(username);
+    let body = paced(|| async move {
+        match followers {
+            true => client.get_user_followers(escaped).await,
+            false => client.get_user_following(escaped).await,
         }
-        false => {
-            client
-                .get_user_following(&escape::component(username))
-                .await
-        }
-    }
+    })
+    .await
     .inspect_err(|error| log::debug!("profiles: cannot count the circle of {username}: {error}"))
     .ok()?;
 
@@ -169,12 +164,15 @@ async fn circle(session: &Session, username: &str, followers: bool) -> Option<u6
 }
 
 async fn fetch(session: &Session, username: &str, playlists: u32) -> Option<Profile> {
-    let body = session
-        .spclient()
-        .get_user_profile(&escape::component(username), Some(playlists), Some(0))
-        .await
-        .inspect_err(|error| log::debug!("profiles: cannot resolve {username}: {error}"))
-        .ok()?;
+    let escaped = escape::component(username);
+    let body = paced(|| {
+        session
+            .spclient()
+            .get_user_profile(&escaped, Some(playlists), Some(0))
+    })
+    .await
+    .inspect_err(|error| log::debug!("profiles: cannot resolve {username}: {error}"))
+    .ok()?;
 
     serde_json::from_slice::<Profile>(&body)
         .inspect_err(|error| log::debug!("profiles: cannot decode {username}: {error}"))

@@ -12,6 +12,10 @@ const WAIT: Duration = Duration::from_millis(500);
 const PATIENCE: Duration = Duration::from_secs(60);
 /// How librespot's limiter words a refusal, in `HttpClient::request_fut`.
 const LIMITER: &str = "rate limited for at least another";
+/// How many requests a bulk lookup keeps in flight. After its burst of 300 the limiter frees
+/// ten requests a second, so a wider fan-out only queues against it and holds back the requests
+/// made beside it.
+pub(crate) const FAN_OUT: usize = 8;
 
 /// Runs a request to Spotify, waiting while librespot's own rate limiter refuses it.
 /// librespot allows 300 requests to spotify.com every 30 seconds and fails the rest at once

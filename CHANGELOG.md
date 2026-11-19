@@ -18,6 +18,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A queue that mixes your own files with streaming songs plays the song it moves on to, instead of carrying on with an earlier local file while the player sits still.
 - Apple Music songs matched from your own files show up in Library and play again after Apple pulls or stops streaming the catalog version they matched.
 - Two copies of one Apple Music song in your library stay separate songs instead of merging into one.
+- Spotify profiles, playlist contributors and playlist change dates load for big libraries too, instead of coming up blank when Sonora reads many of them at once.
 
 ## [0.50.2] - 2026-11-18
 
