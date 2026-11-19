@@ -170,6 +170,7 @@ pub fn track(wrapper: &Value) -> Option<Track> {
         tags: Vec::new(),
         languages: Vec::new(),
         credits: Vec::new(),
+        isrc: None,
     })
 }
 

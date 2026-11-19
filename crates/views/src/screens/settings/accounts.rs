@@ -75,7 +75,8 @@ impl SettingsView {
         vec![
             Group::new("settings-group-services", "icons/music.svg")
                 .cards(Slot::Accounts)
-                .rows(scoped.then_some(Slot::SubsonicLibrary)),
+                .rows(scoped.then_some(Slot::SubsonicLibrary))
+                .rows(self.exportable(cx).then_some(Slot::Export)),
             Group::new("settings-group-local-files", "icons/file-music.svg")
                 .rows([Slot::LocalFolder]),
         ]

@@ -842,6 +842,7 @@ mod tests {
             tags: Vec::new(),
             languages: Vec::new(),
             credits: Vec::new(),
+            isrc: None,
         }
     }
 

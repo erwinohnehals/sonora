@@ -8,6 +8,7 @@ mod discord;
 mod downloads;
 mod drm;
 mod equalizer;
+mod export;
 mod genre;
 mod history;
 mod home;
@@ -56,6 +57,7 @@ pub use downloads::{
 };
 pub use drm::{CdmState, Drm};
 pub use equalizer::{DeviceRule, Equalizer, RuleDevice, Sound};
+pub use export::{Export, ExportNames, ExportState};
 pub use genre::{GenreDetails, Genres};
 pub use history::{History, HistoryState};
 pub use home::Home;
@@ -234,6 +236,7 @@ pub struct Sonora {
     pub drm: Entity<Drm>,
     pub soloist: Entity<Soloist>,
     pub equalizer: Entity<Equalizer>,
+    pub export: Entity<Export>,
     pub library: Entity<Library>,
     pub links: Entity<Links>,
     pub listening: Entity<Listening>,
@@ -377,6 +380,7 @@ pub fn init(
     let cover = cx.new(|cx| Cover::new(session.clone(), playback.clone(), io.clone(), cx));
     let drm = cx.new(|cx| Drm::new(session.clone(), io.clone(), cx));
     let soloist = cx.new(|cx| Soloist::new(session.clone(), io.clone(), cx));
+    let export = cx.new(|cx| Export::new(session.clone(), io.clone(), cx));
     let updates = cx.new(|cx| Updates::new(settings.clone(), io.clone(), cx));
     let requirements = cx.new(|cx| {
         Requirements::new(
@@ -446,6 +450,7 @@ pub fn init(
         drm,
         soloist,
         equalizer,
+        export,
         library,
         links,
         listening,

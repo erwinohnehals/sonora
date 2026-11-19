@@ -22,6 +22,7 @@ pub(crate) struct Row {
     control: AnyElement,
     disabled: bool,
     yielding: bool,
+    alert: bool,
 }
 
 impl Row {
@@ -32,6 +33,7 @@ impl Row {
             control,
             disabled: false,
             yielding: false,
+            alert: false,
         }
     }
 
@@ -46,6 +48,12 @@ impl Row {
     /// one never runs up against a switch or picker.
     pub(crate) fn detail(mut self, detail: SharedString) -> Self {
         self.detail = Some(detail);
+        self
+    }
+
+    /// Draws the explanation in the danger colour, for one that reports a failure.
+    pub(crate) fn alert(mut self, alert: bool) -> Self {
+        self.alert = alert;
         self
     }
 
@@ -64,6 +72,7 @@ impl RenderOnce for Row {
             control,
             disabled,
             yielding,
+            alert,
         } = self;
         let theme = *cx.theme();
 
@@ -97,7 +106,10 @@ impl RenderOnce for Row {
                             .aria_label(detail.clone())
                             .pr_8()
                             .text_size(theme.text(ui::Text::Small))
-                            .text_color(theme.muted_foreground)
+                            .text_color(match alert {
+                                true => theme.danger,
+                                false => theme.muted_foreground,
+                            })
                             .child(detail)
                     })),
             )

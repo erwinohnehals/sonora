@@ -1326,6 +1326,7 @@ fn song_as(value: &Resource, id: String, root: &str) -> Option<Track> {
             .collect(),
         languages: Vec::new(),
         credits: Vec::new(),
+        isrc: None,
     })
 }
 

@@ -97,6 +97,9 @@ pub struct Track {
     pub tags: Vec<String>,
     pub languages: Vec<String>,
     pub credits: Vec<Credit>,
+    /// The recording's ISRC, which names the same recording on every service. `None` where the
+    /// provider does not hand one out.
+    pub isrc: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

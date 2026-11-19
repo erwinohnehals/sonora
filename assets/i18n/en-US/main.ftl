@@ -946,6 +946,22 @@ settings-subsonic-library-all = All libraries
 settings-subsonic-library-unnamed = Library { $id }
 settings-subsonic-library-unavailable = Not on this server anymore
 settings-subsonic-library-retry = Try again
+settings-export = Export library
+settings-export-detail = Your favorites and playlists as CSV and JSON. Track lists only, no audio
+settings-export-button = Export…
+settings-export-listing = Listing your playlists…
+settings-export-reading = Reading { $done } of { $total } lists…
+settings-export-writing = Writing files…
+settings-export-done = { $tracks ->
+    [one] Saved { $tracks } song to { $folder }
+   *[other] Saved { $tracks } songs to { $folder }
+}
+settings-export-skipped = { $skipped ->
+    [one] { $skipped } playlist could not be read
+   *[other] { $skipped } playlists could not be read
+}
+settings-export-failed = Export failed: { $reason }
+export-folder = { $provider } library
 settings-output-device = Output device
 settings-output-device-detail = Audio device where Sonora plays
 settings-output-device-system = System default
@@ -1380,6 +1396,8 @@ toast-playlist-imported-partly = Imported { $name }, leaving out { $count ->
     } not in your library
 toast-playlist-import-empty = None of the songs in { $name } are in your library
 toast-playlist-exported = Playlist exported
+toast-library-exported = Library exported to { $name }
+toast-library-export-failed = The library could not be exported
 toast-file-dialog-failed = Could not open the file dialog
 toast-queued-track = { $name } added to the queue
 toast-next-track = { $name } plays next

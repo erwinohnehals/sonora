@@ -334,6 +334,7 @@ impl Covers {
             tags: item.genres,
             languages: Vec::new(),
             credits,
+            isrc: None,
         }
     }
 

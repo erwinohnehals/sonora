@@ -12,8 +12,8 @@ use i18n::{Language, t};
 use music::SignInPrompt;
 use router::{Destination, SettingsPage, SettingsTab, navigate};
 use state::{
-    AppSettings, Drm, Equalizer, Io, Outputs, Playback, Scan, Scrobbling, Session, SessionState,
-    Sleep, Soloist, Sonora,
+    AppSettings, Drm, Equalizer, Export, Io, Outputs, Playback, Scan, Scrobbling, Session,
+    SessionState, Sleep, Soloist, Sonora,
 };
 use ui::{
     Activate, ActiveTheme as _, Card, Deck, Dismiss, Input, Lazy, Popovers, Scrollbar,
@@ -29,6 +29,7 @@ mod accounts;
 mod appearance;
 mod connect;
 mod discord;
+mod export;
 mod general;
 mod header;
 mod keybinds;
@@ -69,6 +70,7 @@ enum Slot {
     Accounts,
     LocalFolder,
     SubsonicLibrary,
+    Export,
     Folders,
     Theme,
     Adaptive,
@@ -244,6 +246,7 @@ pub struct SettingsView {
     drm: Entity<Drm>,
     soloist: Entity<Soloist>,
     equalizer: Entity<Equalizer>,
+    export: Entity<Export>,
     settings: Entity<AppSettings>,
     outputs: Entity<Outputs>,
     output_picker: Entity<OutputPicker>,
@@ -339,7 +342,10 @@ impl SettingsView {
         let equalizer = Sonora::global(cx).equalizer.clone();
         let outputs = Sonora::global(cx).outputs.clone();
         let soloist = Sonora::global(cx).soloist.clone();
+        let export = Sonora::global(cx).export.clone();
         cx.observe(&drm, |this, _, cx| this.remeasure(cx)).detach();
+        cx.observe(&export, |this, _, cx| this.remeasure(cx))
+            .detach();
         cx.observe(&soloist, |this, _, cx| this.remeasure(cx))
             .detach();
         cx.observe(&equalizer, |this, _, cx| this.remeasure(cx))
@@ -458,6 +464,7 @@ impl SettingsView {
             drm,
             soloist,
             equalizer,
+            export,
             settings,
             outputs,
             output_picker,
@@ -784,6 +791,7 @@ impl SettingsView {
                 },
             ),
             Slot::SubsonicLibrary => (t!("settings-subsonic-library"), SharedString::default()),
+            Slot::Export => (t!("settings-export"), t!("settings-export-detail")),
             Slot::Theme => (t!("settings-theme"), t!("settings-theme-detail")),
             Slot::Adaptive => (t!("settings-adaptive"), t!("settings-adaptive-detail")),
             Slot::CommunityThemes => (
@@ -1067,6 +1075,7 @@ impl SettingsView {
             Slot::Accounts => div().into_any_element(),
             Slot::LocalFolder => self.local_folder_row(cx),
             Slot::SubsonicLibrary => self.subsonic_library_row(cx),
+            Slot::Export => self.export_row(cx),
             Slot::Folders => self.folders(cx),
             Slot::Theme | Slot::Icons | Slot::Corners | Slot::PageWidth => div().into_any_element(),
             Slot::Adaptive => self.adaptive_row(cx),

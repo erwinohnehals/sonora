@@ -174,6 +174,12 @@ fn track_from(uri: &str, track: &TrackMessage) -> Track {
                 })
             })
             .collect(),
+        isrc: track
+            .external_id
+            .iter()
+            .find(|external| external.type_().eq_ignore_ascii_case("isrc"))
+            .and_then(|external| non_empty(external.id.as_deref()))
+            .map(str::to_owned),
     }
 }
 

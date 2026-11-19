@@ -674,6 +674,7 @@ pub fn track_from_file(
             tags: genres,
             languages: languages.iter().map(|code| language_code(code)).collect(),
             credits,
+            isrc: None,
         },
         album_artist,
         album_artists,
