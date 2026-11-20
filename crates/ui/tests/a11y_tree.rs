@@ -164,6 +164,28 @@ async fn icon_only_button_names_itself_from_tooltip(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn tipless_button_keeps_its_tooltip_as_its_name(cx: &mut TestAppContext) {
+    let lines = open_probe(cx, |window, cx| {
+        let element = Button::new("play")
+            .icon("icons/play.svg")
+            .tooltip_above("play")
+            .tipless()
+            .render(window, cx)
+            .into_element();
+        snapshot("tipless-button", &element)
+    });
+    let lines = rendered(&lines, "tipless-button");
+    assert!(
+        lines.iter().any(|line| line.contains("role=Button")),
+        "tipless button exposes no Role::Button, screen readers skip it: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("name=Some")),
+        "tipless button lost the name its tooltip gave it: {lines:?}"
+    );
+}
+
+#[gpui::test]
 async fn named_button_reads_its_label_as_description(cx: &mut TestAppContext) {
     let lines = open_probe(cx, |window, cx| {
         let element = Button::new("language-picker")

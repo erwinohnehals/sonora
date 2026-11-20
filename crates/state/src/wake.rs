@@ -51,7 +51,7 @@ impl Wake {
 
         let this = cx.weak_entity();
         cx.on_window_closed(move |cx, _| {
-            if !cx.windows().is_empty() {
+            if !crate::main_windows(cx).is_empty() {
                 return;
             }
             this.update(cx, |this, cx| {

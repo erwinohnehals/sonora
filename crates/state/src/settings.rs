@@ -511,6 +511,8 @@ struct Values {
     /// Whether the Windows taskbar button fills with the track's progress while it plays. Off
     /// clears the fill, so the button shows only its icon.
     taskbar_progress: bool,
+    /// Whether a small player sits on the Windows taskbar, beside the notification area.
+    taskbar_player: bool,
     language: String,
     #[serde(default = "system_font")]
     font: String,
@@ -778,6 +780,7 @@ impl Default for Values {
             stay_awake: true,
             now_playing_on_file_open: true,
             taskbar_progress: true,
+            taskbar_player: false,
             language: i18n::AUTO.to_owned(),
             font: system_font(),
             startup: DEFAULT_STARTUP.to_owned(),
@@ -1364,6 +1367,11 @@ impl AppSettings {
     /// Whether the Windows taskbar button fills with the track's progress while it plays.
     pub fn taskbar_progress(&self) -> bool {
         self.values.taskbar_progress
+    }
+
+    /// Whether the small player on the Windows taskbar is showing.
+    pub fn taskbar_player(&self) -> bool {
+        self.values.taskbar_player
     }
 
     /// Whether plays from the provider with this slug are submitted to the linked scrobbling
@@ -2043,6 +2051,11 @@ impl AppSettings {
 
     pub fn set_taskbar_progress(&mut self, taskbar_progress: bool, cx: &mut Context<Self>) {
         self.values.taskbar_progress = taskbar_progress;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_taskbar_player(&mut self, taskbar_player: bool, cx: &mut Context<Self>) {
+        self.values.taskbar_player = taskbar_player;
         self.schedule_save(cx);
     }
 

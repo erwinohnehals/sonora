@@ -13,6 +13,8 @@ mod logging;
 mod memory;
 mod single;
 #[cfg(windows)]
+mod taskbar_player;
+#[cfg(windows)]
 mod thumbbar;
 mod tray;
 #[cfg(windows)]
@@ -201,11 +203,14 @@ fn main() -> ExitCode {
             cx.set_quit_mode(QuitMode::Explicit);
         }
         actions::register(lingers, cx);
+        state::install_show_main_window(show_window, cx);
         #[cfg(target_os = "macos")]
         gestures::install(cx);
         memory::watch(cx);
 
         open_window(cx);
+        #[cfg(windows)]
+        taskbar_player::install(cx);
         let session = Sonora::global(cx).session.clone();
         session.update(cx, |session, cx| session.restore(cx));
 
@@ -310,7 +315,7 @@ fn destination(linked: &Linked) -> Option<Destination> {
 }
 
 fn show_window(cx: &mut App) {
-    match cx.windows().first() {
+    match state::main_windows(cx).first() {
         Some(window) => {
             window
                 .update(cx, |_, window, _| window.activate_window())
@@ -333,8 +338,7 @@ enum WindowAction {
 
 /// Shows the window when it is hidden, minimized or closed, and hides it when it is visible.
 fn toggle_window(cx: &mut App) {
-    let visible = cx
-        .windows()
+    let visible = state::main_windows(cx)
         .first()
         .and_then(|window| window.update(cx, |_, window, _| window.is_visible()).ok());
     match window_action(visible) {
@@ -360,7 +364,7 @@ fn hide_window(cx: &mut App) {
 
 #[cfg(not(target_os = "linux"))]
 fn hide_window(cx: &mut App) {
-    if let Some(window) = cx.windows().first() {
+    if let Some(window) = state::main_windows(cx).first() {
         window
             .update(cx, |_, window, _| window.minimize_window())
             .ok();

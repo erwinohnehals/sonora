@@ -24,7 +24,7 @@ impl Global for HidingToTray {}
 /// since the tray it was hidden from brings it back.
 #[cfg(target_os = "linux")]
 pub fn hide_to_tray(cx: &mut App) {
-    let Some(window) = cx.windows().first().copied() else {
+    let Some(window) = state::main_windows(cx).first().copied() else {
         return;
     };
     cx.set_global(HidingToTray);
@@ -42,7 +42,7 @@ pub fn register(lingers: bool, cx: &mut App) {
     cx.on_action(|_: &ShowAll, cx: &mut App| cx.unhide_other_apps());
 
     cx.on_window_closed(move |cx, _| {
-        if !cx.windows().is_empty() {
+        if !state::main_windows(cx).is_empty() {
             return;
         }
         let hiding = cx.has_global::<HidingToTray>();

@@ -28,6 +28,9 @@ const ITEM_MENU_WIDTH: Pixels = px(196.);
 /// How narrow a menu over several selected tracks can get, since its labels carry the count.
 const SELECTION_MENU_WIDTH: Pixels = px(248.);
 
+/// Opens the playlist editor for New playlist in a playlist menu.
+pub(crate) type Create = fn(Edit, &mut Window, &mut App);
+
 /// Something a context menu can open on, wherever it was clicked.
 #[derive(Clone)]
 pub(crate) enum Item {
@@ -196,11 +199,30 @@ impl ItemMenu {
     /// A playlist holding every named track is checked, and picking it takes the tracks out
     /// again with the menu left open. An album is never checked, since its tracks are only read
     /// once it is added, and picking a playlist for it closes the menu.
+    /// The playlists of `track`'s provider, as a panel of its own for the taskbar player's
+    /// picker. `create` opens the editor for New playlist, which the picker is too small to hold.
+    pub(crate) fn picker(&self, track: &Track, create: Create, cx: &App) -> Menu {
+        let ids: Vec<String> = track.id.iter().cloned().collect();
+        let shelf = Shelf::of(track.id.as_deref().unwrap_or_default());
+        self.playlist_rows_with(Addition::Tracks(ids), shelf, Vec::new(), create, cx)
+    }
+
     fn playlist_rows(
         &self,
         addition: Addition,
         shelf: Shelf,
         lead: Vec<MenuItem>,
+        cx: &App,
+    ) -> Menu {
+        self.playlist_rows_with(addition, shelf, lead, PlaylistEditor::open, cx)
+    }
+
+    fn playlist_rows_with(
+        &self,
+        addition: Addition,
+        shelf: Shelf,
+        lead: Vec<MenuItem>,
+        create: Create,
         cx: &App,
     ) -> Menu {
         let library = Sonora::global(cx).library.clone();
@@ -221,7 +243,7 @@ impl ItemMenu {
         let new_playlist = MenuItem::new("new-playlist", t!("menu-new-playlist"))
             .icon("icons/plus.svg")
             .on_click(move |_, window, cx| {
-                PlaylistEditor::open(
+                create(
                     Edit::Create {
                         addition: created.clone(),
                         shelf,

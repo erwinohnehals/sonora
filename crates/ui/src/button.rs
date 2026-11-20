@@ -419,6 +419,19 @@ impl Button {
         self
     }
 
+    /// Drops the hover text but keeps what it says as the button's accessible name, for a button
+    /// in a window too small to draw a tooltip in, such as the taskbar player. Call it after the
+    /// tooltip is set.
+    pub fn tipless(mut self) -> Self {
+        let Some((key, _)) = self.tooltip.take() else {
+            return self;
+        };
+        if self.name.is_none() && self.label.is_none() {
+            self.name = Some(i18n::lookup(&key, None));
+        }
+        self
+    }
+
     pub fn on_click(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,

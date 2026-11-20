@@ -153,6 +153,7 @@ enum Slot {
     TrayIcon,
     NowPlayingOnFileOpen,
     TaskbarProgress,
+    TaskbarPlayer,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     ServerSideDecorations,
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
@@ -778,6 +779,10 @@ impl SettingsView {
                 t!("settings-taskbar-progress"),
                 t!("settings-taskbar-progress-detail"),
             ),
+            Slot::TaskbarPlayer => (
+                t!("settings-taskbar-player"),
+                t!("settings-taskbar-player-detail"),
+            ),
             Slot::Accounts => {
                 let detail = t!("settings-accounts-detail");
                 let names = self.account_words(cx);
@@ -1072,6 +1077,7 @@ impl SettingsView {
             Slot::TrayIcon => self.tray_icon_row(cx),
             Slot::NowPlayingOnFileOpen => self.now_playing_on_file_open_row(cx),
             Slot::TaskbarProgress => self.taskbar_progress_row(cx),
+            Slot::TaskbarPlayer => self.taskbar_player_row(cx),
             Slot::Accounts => div().into_any_element(),
             Slot::LocalFolder => self.local_folder_row(cx),
             Slot::SubsonicLibrary => self.subsonic_library_row(cx),

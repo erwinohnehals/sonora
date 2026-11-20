@@ -726,7 +726,10 @@ impl Menu {
             .collect()
     }
 
-    fn inline(mut self) -> Self {
+    /// Draws the panel where it stands instead of floating it above the window, for a submenu
+    /// or for a window that holds nothing but the menu, such as the taskbar player's playlist
+    /// picker. An inline menu has no shield, so its owner closes it on a click elsewhere.
+    pub fn inline(mut self) -> Self {
         self.deferred = false;
         self
     }

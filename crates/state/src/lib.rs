@@ -46,6 +46,7 @@ mod usage;
 mod vault;
 mod wake;
 mod window_shape;
+mod windows;
 
 pub use artist::{ArtistDetail, ArtistDetailEvent};
 pub use control::Control;
@@ -107,6 +108,9 @@ pub use usage::Usage;
 pub use vault::CACHE_GB_RANGE;
 pub use wake::Wake;
 pub use window_shape::{apply_window_rounding, install_rounded_window_hook};
+pub use windows::{
+    accessory, install_show_main_window, is_accessory, main_windows, show_main_window,
+};
 
 use std::future::Future;
 use std::sync::Arc;

@@ -481,13 +481,28 @@ impl SettingsView {
                 .into_any_element(),
         )
     }
+
+    pub(super) fn taskbar_player_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.settings.read(cx).taskbar_player();
+
+        self.row(
+            t!("settings-taskbar-player"),
+            Switch::new("taskbar-player", on)
+                .name(t!("settings-taskbar-player"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings
+                        .update(cx, |settings, cx| settings.set_taskbar_player(!on, cx));
+                }))
+                .into_any_element(),
+        )
+    }
 }
 
 /// The rows about the Windows taskbar button. Only Windows has that button, so the list is
 /// empty everywhere else and the row is left off the page.
 fn taskbar_slots() -> Vec<Slot> {
     match cfg!(target_os = "windows") {
-        true => vec![Slot::TaskbarProgress],
+        true => vec![Slot::TaskbarProgress, Slot::TaskbarPlayer],
         false => Vec::new(),
     }
 }
