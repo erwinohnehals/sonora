@@ -279,6 +279,16 @@ impl Default for VisualizerScreens {
     }
 }
 
+/// Where the listener dragged the taskbar player to, in logical pixels from the nearer end of the
+/// room it can move in, so it stays put there when the taskbar changes width.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum TaskbarSpot {
+    /// From the taskbar's left end to the player's left edge.
+    Left(f32),
+    /// From the player's right edge to the notification area.
+    Right(f32),
+}
+
 /// A window's saved position and size in logical pixels, plus whether it was maximized.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -511,7 +521,7 @@ struct Values {
     /// Whether the Windows taskbar button fills with the track's progress while it plays. Off
     /// clears the fill, so the button shows only its icon.
     taskbar_progress: bool,
-    /// Whether a small player sits on the Windows taskbar, beside the notification area.
+    /// Whether a small player sits on the Windows taskbar.
     taskbar_player: bool,
     language: String,
     #[serde(default = "system_font")]
@@ -842,6 +852,8 @@ struct StateValues {
     sidebar_pin_reversed: bool,
     resume: Option<Resume>,
     window: Option<Frame>,
+    /// Where the taskbar player was dragged to. `None` leaves it at its usual place.
+    taskbar_player_spot: Option<TaskbarSpot>,
     system_theme: String,
     /// The variant last chosen in each theme family, by family id.
     theme_variants: HashMap<String, String>,
@@ -876,6 +888,7 @@ impl Default for StateValues {
             sidebar_pin_reversed: false,
             resume: None,
             window: None,
+            taskbar_player_spot: None,
             system_theme: ThemeKind::Dark.id().to_owned(),
             theme_variants: HashMap::new(),
             picks: Vec::new(),
@@ -1372,6 +1385,11 @@ impl AppSettings {
     /// Whether the small player on the Windows taskbar is showing.
     pub fn taskbar_player(&self) -> bool {
         self.values.taskbar_player
+    }
+
+    /// Where the listener dragged the taskbar player to, or `None` when they never moved it.
+    pub fn taskbar_player_spot(&self) -> Option<TaskbarSpot> {
+        self.state.taskbar_player_spot
     }
 
     /// Whether plays from the provider with this slug are submitted to the linked scrobbling
@@ -2057,6 +2075,15 @@ impl AppSettings {
     pub fn set_taskbar_player(&mut self, taskbar_player: bool, cx: &mut Context<Self>) {
         self.values.taskbar_player = taskbar_player;
         self.schedule_save(cx);
+    }
+
+    /// Remembers where the taskbar player was dragged to. `None` sends it back to its usual place.
+    pub fn set_taskbar_player_spot(&mut self, spot: Option<TaskbarSpot>, cx: &mut Context<Self>) {
+        if self.state.taskbar_player_spot == spot {
+            return;
+        }
+        self.state.taskbar_player_spot = spot;
+        self.schedule_state_save(cx);
     }
 
     pub fn set_scrobbles(&mut self, provider: &str, enabled: bool, cx: &mut Context<Self>) {

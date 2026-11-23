@@ -1,9 +1,10 @@
 //! The small player on the Windows taskbar, and the playlist picker it opens.
 //!
 //! [`views::TaskbarPlayer`] draws the player and [`views::PlaylistPicker`] the picker; this module
-//! opens their windows, lays the player over the free strip of the taskbar beside the
-//! notification area, and keeps it there as the taskbar changes. The Win32 side of that lives in
-//! [`shell`]. The player follows the `taskbar_player` setting and is off by default.
+//! opens their windows, lays the player over a free stretch of the taskbar, and keeps it there as
+//! the taskbar changes. It starts out at the left end, and dragging it moves it to any other free
+//! place. The Win32 side of that lives in [`shell`]. The player follows the `taskbar_player`
+//! setting and is off by default.
 //!
 //! Moving, showing or raising a window calls straight back into GPUI's window procedure, which
 //! must not happen while GPUI is in the middle of an update. So every such call goes through
@@ -21,13 +22,13 @@ use gpui::{
 };
 use music::Track;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use state::Sonora;
+use state::{Sonora, TaskbarSpot};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 use ui::ActiveTheme as _;
 use views::{PlaylistPicker, PlaylistPickerEvent, TaskbarPlayer, TaskbarPlayerEvent};
 use windows::Win32::Foundation::{HWND, RECT};
 
-use shell::{Signal, Taskbar, Watch};
+use shell::{Fit, Signal, Span, Taskbar, Watch, Wish};
 
 /// The widest the player grows, in logical pixels, when the taskbar has the room.
 const MOST: f32 = 360.;
@@ -36,8 +37,8 @@ const MOST: f32 = 360.;
 /// With less room than this it stays hidden rather than cover the taskbar's buttons.
 const LEAST: f32 = 196.;
 
-/// The clear space between the player and the taskbar's buttons or notification area, in
-/// logical pixels.
+/// The clear space between the player and the taskbar's end, its buttons or its notification
+/// area, in logical pixels.
 const GAP: f32 = 8.;
 
 /// The clear space between the picker's panel and the top of the taskbar, in logical pixels.
@@ -78,8 +79,8 @@ struct Player {
     hwnd: HWND,
     watch: Watch,
     taskbar: Option<Taskbar>,
-    /// The right edge of the taskbar's buttons as last measured, in physical pixels.
-    buttons_end: Option<i32>,
+    /// The taskbar's buttons as last measured.
+    buttons: Option<Vec<Span>>,
     /// Whether the buttons have been measured at least once. Until then the player stays
     /// hidden, since it cannot tell yet whether it would cover them.
     measured: bool,
@@ -87,6 +88,8 @@ struct Player {
     /// What was last applied to the window, so a layout that changes nothing touches nothing.
     shown: bool,
     placed: Option<RECT>,
+    /// Where a drag wants the player's left edge, in physical pixels, while there is one.
+    dragged: Option<i32>,
     measuring: Option<Task<()>>,
     settling: Option<Task<()>>,
     raising: Option<Task<()>>,
@@ -122,7 +125,9 @@ impl Host {
         match (wanted, self.player.is_some()) {
             (true, false) => self.open(cx),
             (false, true) => self.close(cx),
-            _ => {}
+            // The place the player was dragged to may have been reset.
+            (true, true) => self.apply(cx),
+            (false, false) => {}
         }
     }
 
@@ -148,17 +153,25 @@ impl Host {
                 .ok();
             return;
         };
-        shell::dress(hwnd, false);
         // GPUI showed it at a pixel's size; it stays hidden until the taskbar is measured.
-        later(cx, move || shell::show(hwnd, false));
+        later(cx, move || {
+            shell::show(hwnd, false);
+            shell::dress(hwnd, false);
+        });
 
         let taskbar = Taskbar::find();
         let (sender, receiver) = mpsc::unbounded_channel();
         let watch = Watch::new(hwnd, taskbar.map(|taskbar| taskbar.hwnd), sender);
-        let _events = cx.subscribe(&entity, |this, _, event: &TaskbarPlayerEvent, cx| {
-            let TaskbarPlayerEvent::Pick { track, anchor } = event;
-            this.toggle_picker(track.clone(), *anchor, cx);
-        });
+        let _events = cx.subscribe(
+            &entity,
+            |this, _, event: &TaskbarPlayerEvent, cx| match event {
+                TaskbarPlayerEvent::Pick { track, anchor } => {
+                    this.toggle_picker((**track).clone(), *anchor, cx)
+                }
+                TaskbarPlayerEvent::Drag { grab } => this.drag(*grab, cx),
+                TaskbarPlayerEvent::Drop => this.settle_drag(cx),
+            },
+        );
         log::info!(
             "taskbar player: opened, taskbar at {:?}",
             taskbar.map(|taskbar| taskbar.rect)
@@ -170,11 +183,12 @@ impl Host {
             hwnd,
             watch,
             taskbar,
-            buttons_end: None,
+            buttons: None,
             measured: false,
             fullscreen: shell::fullscreen_now(),
             shown: false,
             placed: None,
+            dragged: None,
             measuring: None,
             settling: None,
             raising: None,
@@ -258,8 +272,8 @@ impl Host {
         }));
     }
 
-    /// Reads how far the taskbar's buttons reach, on a background thread, then lays the player
-    /// out again. A measurement still running is dropped for the new one.
+    /// Reads where the taskbar's buttons are, on a background thread, then lays the player out
+    /// again. A measurement still running is dropped for the new one.
     fn measure(&mut self, cx: &mut Context<Self>) {
         let Some(player) = self.player.as_mut() else {
             return;
@@ -272,13 +286,13 @@ impl Host {
         let (hwnd, tray_left) = (taskbar.hwnd.0 as isize, taskbar.tray_left);
         let job = cx
             .background_executor()
-            .spawn(async move { shell::buttons_end(hwnd, tray_left) });
+            .spawn(async move { shell::buttons(hwnd, tray_left) });
         player.measuring = Some(cx.spawn(async move |this, cx| {
-            let end = job.await;
+            let buttons = job.await;
             this.update(cx, |this, cx| {
                 if let Some(player) = this.player.as_mut() {
-                    if end.is_some() {
-                        player.buttons_end = end;
+                    if buttons.is_some() {
+                        player.buttons = buttons;
                     }
                     player.measured = true;
                     player.measuring = None;
@@ -289,9 +303,10 @@ impl Host {
         }));
     }
 
-    /// Puts the player where the taskbar has room for it, or hides it when there is none, a full
-    /// screen app is up or the taskbar has slid away.
+    /// Puts the player as near as the taskbar has room to where it was dragged, or hides it when
+    /// there is none, a full screen app is up or the taskbar has slid away.
     fn apply(&mut self, cx: &mut Context<Self>) {
+        let spot = Sonora::global(cx).settings.read(cx).taskbar_player_spot();
         let Some(player) = self.player.as_mut() else {
             return;
         };
@@ -300,13 +315,22 @@ impl Host {
             .filter(|taskbar| taskbar.shown() && player.measured)
             .and_then(|taskbar| {
                 let scale = |logical: f32| (logical * taskbar.scale).round() as i32;
-                shell::slot(
-                    &taskbar,
-                    player.buttons_end,
-                    scale(MOST),
-                    scale(LEAST),
-                    scale(GAP),
-                )
+                let wish = match (player.dragged, spot) {
+                    (Some(left), _) => Wish::Left(left),
+                    (None, Some(TaskbarSpot::Left(offset))) => {
+                        Wish::Left(taskbar.rect.left + scale(offset))
+                    }
+                    (None, Some(TaskbarSpot::Right(offset))) => {
+                        Wish::Right(taskbar.tray_left - scale(offset))
+                    }
+                    (None, None) => Wish::Usual,
+                };
+                let fit = Fit {
+                    most: scale(MOST),
+                    least: scale(LEAST),
+                    gap: scale(GAP),
+                };
+                shell::slot(&taskbar, player.buttons.as_deref(), wish, fit)
             });
         let shown = rect.is_some() && !player.fullscreen;
         let target = rect.filter(|_| shown);
@@ -327,6 +351,45 @@ impl Host {
         if !shown {
             self.close_picker(cx);
         }
+    }
+
+    /// Moves the player along under the pointer, which holds it `grab` from its left edge. It
+    /// goes only where there is room, so where it is seen is where it will stay.
+    fn drag(&mut self, grab: Pixels, cx: &mut Context<Self>) {
+        let Some(player) = self.player.as_mut() else {
+            return;
+        };
+        let Some(cursor) = shell::cursor() else {
+            return;
+        };
+        let grab = f32::from(grab) * shell::scale(player.hwnd);
+        player.dragged = Some(cursor.x - grab.round() as i32);
+        self.close_picker(cx);
+        self.apply(cx);
+    }
+
+    /// Ends a drag and remembers where the player is, from whichever end it is nearer to.
+    fn settle_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(player) = self.player.as_mut() else {
+            return;
+        };
+        if player.dragged.take().is_none() {
+            return;
+        }
+        let (Some(taskbar), Some(rect)) = (player.taskbar, player.placed) else {
+            return;
+        };
+        let logical = |physical: i32| physical as f32 / taskbar.scale;
+        let left = rect.left - taskbar.rect.left;
+        let right = taskbar.tray_left - rect.right;
+        let spot = match left <= right {
+            true => TaskbarSpot::Left(logical(left)),
+            false => TaskbarSpot::Right(logical(right)),
+        };
+        let settings = Sonora::global(cx).settings.clone();
+        settings.update(cx, |settings, cx| {
+            settings.set_taskbar_player_spot(Some(spot), cx)
+        });
     }
 
     /// Brings the player, and the picker above it, back over the taskbar.
@@ -382,7 +445,7 @@ impl Host {
                 .ok();
             return;
         };
-        shell::dress(hwnd, true);
+        later(cx, move || shell::dress(hwnd, true));
         let _events = cx.subscribe(
             &entity,
             |this, _, event: &PlaylistPickerEvent, cx| match event {
@@ -421,8 +484,9 @@ impl Host {
             .taskbar
             .map_or(widget.left, |taskbar| taskbar.monitor.left);
         let right = widget.left + physical(picker.anchor.right()) + margin;
-        let left = (right - width).max(floor - margin);
-        let bottom = widget.top - (PICKER_GAP * scale).round() as i32 + margin;
+        let gap = (PICKER_GAP * scale).round() as i32;
+        let left = (right - width).max(floor + gap - margin);
+        let bottom = widget.top - gap + margin;
         let rect = RECT {
             left,
             top: bottom - height,

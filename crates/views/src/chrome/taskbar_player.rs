@@ -10,8 +10,9 @@ use std::rc::Rc;
 use gpui::accesskit::Role;
 use gpui::prelude::*;
 use gpui::{
-    Bounds, Context, Entity, EventEmitter, MouseButton, Pixels, SharedString, Size, Subscription,
-    Window, div, px,
+    Bounds, Context, DispatchPhase, Entity, EventEmitter, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, Subscription, Window, canvas,
+    div, px,
 };
 use i18n::t;
 use music::Track;
@@ -29,6 +30,10 @@ const TEXT_ROOM: Pixels = px(240.);
 /// The capsule's outline, which the cover has to fit inside with the rest.
 const BORDER: Pixels = px(1.);
 
+/// How far the pointer travels with the song held before that drags the player rather than
+/// clicks it.
+const DRAG_START: Pixels = px(4.);
+
 /// The clear room around the picker's panel, so its shadow is not cut off at the window's edge.
 const SHADOW_ROOM: Pixels = px(12.);
 
@@ -37,9 +42,23 @@ pub enum TaskbarPlayerEvent {
     /// Open the playlist picker for the playing track, above `anchor`, which is the Add to
     /// playlist button's bounds in the window.
     Pick {
-        track: Track,
+        track: Box<Track>,
         anchor: Bounds<Pixels>,
     },
+    /// The player is being dragged and goes where the pointer is, which holds it `grab` from the
+    /// window's left edge.
+    Drag { grab: Pixels },
+    /// The drag is over and the player stays where it is.
+    Drop,
+}
+
+/// The left button held down on the song.
+#[derive(Clone, Copy)]
+struct Press {
+    /// Where it went down, in the window.
+    at: Point<Pixels>,
+    /// Whether the pointer has travelled far enough for a drag.
+    dragging: bool,
 }
 
 /// The capsule on the taskbar: the playing cover, title and artist, the heart, Add to playlist,
@@ -50,6 +69,7 @@ pub struct TaskbarPlayer {
     pick_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Whether the picker is open, which the Add to playlist button tells screen readers.
     picking: bool,
+    press: Option<Press>,
 }
 
 impl EventEmitter<TaskbarPlayerEvent> for TaskbarPlayer {}
@@ -69,6 +89,7 @@ impl TaskbarPlayer {
             playback,
             pick_bounds: Rc::default(),
             picking: false,
+            press: None,
         }
     }
 
@@ -87,10 +108,84 @@ impl TaskbarPlayer {
         let Some(anchor) = self.pick_bounds.get() else {
             return;
         };
-        cx.emit(TaskbarPlayerEvent::Pick { track, anchor });
+        cx.emit(TaskbarPlayerEvent::Pick {
+            track: Box::new(track),
+            anchor,
+        });
     }
 
-    /// The cover, title and artist. A click brings the main window up.
+    fn press(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.press = Some(Press {
+            at: event.position,
+            dragging: false,
+        });
+        cx.notify();
+    }
+
+    fn drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        // The button came up where the window could not hear it.
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.release(cx);
+            return;
+        }
+        let Some(press) = self.press.as_mut() else {
+            return;
+        };
+        if !press.dragging && (event.position.x - press.at.x).abs() < DRAG_START {
+            return;
+        }
+        let grab = press.at.x;
+        if !press.dragging {
+            press.dragging = true;
+            cx.notify();
+        }
+        cx.emit(TaskbarPlayerEvent::Drag { grab });
+    }
+
+    fn release(&mut self, cx: &mut Context<Self>) {
+        let Some(press) = self.press else {
+            return;
+        };
+        if press.dragging {
+            cx.emit(TaskbarPlayerEvent::Drop);
+        }
+        // The click that ends a drag is still to come in this event, and has to see the drag.
+        let this = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            this.update(cx, |this, cx| {
+                this.press = None;
+                cx.notify();
+            })
+            .ok();
+        });
+    }
+
+    /// Follows the pointer while the song is held. The window has the mouse captured then, so
+    /// this hears moves beyond its edges too.
+    fn tracker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let moved = this.clone();
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        moved.update(cx, |this, cx| this.drag(event, cx)).ok();
+                    }
+                });
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
+                        this.update(cx, |this, cx| this.release(cx)).ok();
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
+    }
+
+    /// The cover, title and artist. A click brings the main window up, and a drag moves the
+    /// player along the taskbar.
     fn song(
         &self,
         track: Option<&Track>,
@@ -100,6 +195,7 @@ impl TaskbarPlayer {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let hover = theme.secondary_hover;
+        let dragging = self.press.is_some_and(|press| press.dragging);
         let label = match track {
             Some(track) => SharedString::from(format!("{} — {}", track.name, track.artists)),
             None => t!("player-nothing-playing"),
@@ -115,11 +211,19 @@ impl TaskbarPlayer {
             .h_full()
             .items_center()
             .gap_2()
-            .px_1()
+            .pr_1()
             .rounded(theme.radius)
-            .cursor_pointer()
+            .map(|this| match dragging {
+                true => this.cursor_grabbing(),
+                false => this.cursor_pointer(),
+            })
             .hover(move |style| style.bg(hover))
-            .on_click(|_, _, cx| state::show_main_window(cx))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::press))
+            .on_click(cx.listener(|this, _, _, cx| {
+                if !this.press.is_some_and(|press| press.dragging) {
+                    state::show_main_window(cx);
+                }
+            }))
             .child(Artwork::new(cover).size(cover_size).flex_none())
             .when(roomy, |this| {
                 this.child(
@@ -165,11 +269,8 @@ impl Render for TaskbarPlayer {
         let track = self.playback.read(cx).shown_track(cx);
         let viewport = window.viewport_size();
         let roomy = viewport.width >= TEXT_ROOM;
-        // A large text size grows the cover past what a taskbar row holds, so it stops there.
-        let cover_size = theme
-            .metrics
-            .control
-            .min(viewport.height - theme.metrics.pad - BORDER * 2.);
+        // The cover is as tall as the taskbar lets it be.
+        let cover_size = (viewport.height - theme.metrics.pad - BORDER * 2.).max(Pixels::ZERO);
         let playable = track.as_ref().is_some_and(|track| track.id.is_some());
         let bounds = self.pick_bounds.clone();
 
@@ -187,9 +288,7 @@ impl Render for TaskbarPlayer {
 
         div()
             .size_full()
-            .flex()
-            .items_center()
-            .p(theme.metrics.pad / 2.)
+            .when(self.press.is_some(), |this| this.child(self.tracker(cx)))
             .child(
                 div()
                     .id("taskbar-player")
@@ -199,7 +298,7 @@ impl Render for TaskbarPlayer {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .px(theme.metrics.pad / 2.)
+                    .p(theme.metrics.pad / 2.)
                     .rounded(theme.radius)
                     .border(BORDER)
                     .border_color(theme.border)

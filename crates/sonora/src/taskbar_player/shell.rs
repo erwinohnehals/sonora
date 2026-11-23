@@ -2,8 +2,8 @@
 //! that move, hide or bury it.
 //!
 //! Windows 11 has no way left to put a control inside the taskbar, so the player is an ordinary
-//! topmost tool window laid over the strip between the taskbar's buttons and the notification
-//! area. That brings four duties, all handled here:
+//! topmost tool window laid over a stretch of the taskbar that has no buttons. That brings four
+//! duties, all handled here:
 //!
 //! - **Finding room.** The taskbar draws its buttons in XAML, so their extent is read through UI
 //!   Automation, which is slow enough to run off the main thread.
@@ -21,7 +21,7 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 
 use tokio::sync::mpsc::UnboundedSender;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
     DwmSetWindowAttribute,
@@ -46,12 +46,13 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND,
-    FindWindowExW, FindWindowW, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GetAncestor, GetWindow,
-    GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, HWND_TOPMOST, OBJID_WINDOW,
-    RegisterWindowMessageW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_SETTINGCHANGE, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    FindWindowExW, FindWindowW, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor,
+    GetCursorPos, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
+    HWND_TOPMOST, OBJID_WINDOW, RegisterWindowMessageW, SW_HIDE, SW_SHOWNOACTIVATE,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_SETTINGCHANGE, WS_CAPTION, WS_EX_APPWINDOW,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::w;
 
@@ -87,7 +88,7 @@ pub enum Signal {
 pub struct Taskbar {
     pub hwnd: HWND,
     pub rect: RECT,
-    /// The left edge of the notification area, which the player sits against.
+    /// The left edge of the notification area, which the player stays left of.
     pub tray_left: i32,
     /// The taskbar's monitor, for telling whether an auto-hidden taskbar has slid out of view.
     pub monitor: RECT,
@@ -153,43 +154,96 @@ impl Taskbar {
     }
 }
 
-/// Where the player goes: as wide as it wants, up to `most` physical pixels, between the right
-/// edge of the taskbar's buttons and the notification area, `gap` clear of both. `None` when the
-/// room left is narrower than `least`.
-pub fn slot(
-    taskbar: &Taskbar,
-    buttons_end: Option<i32>,
-    most: i32,
-    least: i32,
-    gap: i32,
-) -> Option<RECT> {
-    let right = taskbar.tray_left - gap;
-    let left_limit = buttons_end.map_or(taskbar.rect.left, |end| end + gap);
-    let width = (right - left_limit).min(most);
-    if width < least {
-        return None;
-    }
+/// A stretch of the taskbar from its left to its right edge, in physical pixels.
+pub type Span = (i32, i32);
+
+/// Where on the taskbar the player would like to be, in physical pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wish {
+    /// At the left end of the taskbar, or against the notification area when the taskbar's
+    /// buttons already have the left end.
+    Usual,
+    /// With its left edge here.
+    Left(i32),
+    /// With its right edge here.
+    Right(i32),
+}
+
+/// How wide the player may be and how far it keeps from what it sits beside, in physical pixels.
+#[derive(Clone, Copy, Debug)]
+pub struct Fit {
+    pub most: i32,
+    pub least: i32,
+    pub gap: i32,
+}
+
+/// Where the player goes: the free place nearest to `wish`, as tall as the taskbar and as wide as
+/// the room there lets it be. `None` when no free stretch is wide enough. `buttons` are the
+/// taskbar's buttons from left to right, or `None` when they could not be read.
+pub fn slot(taskbar: &Taskbar, buttons: Option<&[Span]>, wish: Wish, fit: Fit) -> Option<RECT> {
+    let free = free(taskbar, buttons.unwrap_or_default(), fit);
+    let width = |(left, right): Span| (right - left).min(fit.most);
+    let (span, left) = match wish {
+        Wish::Usual => {
+            let (first, last) = (*free.first()?, *free.last()?);
+            // Buttons that start at the left end leave one stretch, whose left edge moves with
+            // every app opened, so there the player holds on to the other end. So it does
+            // unmeasured, since the left end is where a button is likeliest.
+            let clear = free.len() > 1 || first.0 <= taskbar.rect.left + fit.gap;
+            match clear && buttons.is_some() {
+                true => (first, first.0),
+                false => (last, last.1 - width(last)),
+            }
+        }
+        Wish::Left(wanted) => free
+            .into_iter()
+            .map(|span| (span, wanted.clamp(span.0, span.1 - width(span))))
+            .min_by_key(|(_, left)| (left - wanted).abs())?,
+        Wish::Right(wanted) => free
+            .into_iter()
+            .map(|span| {
+                let width = width(span);
+                (span, (wanted - width).clamp(span.0, span.1 - width))
+            })
+            .min_by_key(|(span, left)| (left + width(*span) - wanted).abs())?,
+    };
     Some(RECT {
-        left: right - width,
+        left,
         top: taskbar.rect.top,
-        right,
+        right: left + width(span),
         bottom: taskbar.rect.bottom,
     })
 }
 
-/// The right edge of the rightmost taskbar button left of the notification area, read through UI
+/// The stretches left of the notification area that are clear of every button and wide enough for
+/// the player, from left to right.
+fn free(taskbar: &Taskbar, buttons: &[Span], fit: Fit) -> Vec<Span> {
+    let mut free = Vec::new();
+    let mut reached = taskbar.rect.left;
+    let end = (taskbar.tray_left, taskbar.tray_left);
+    for (left, right) in buttons.iter().copied().chain([end]) {
+        let span = (reached + fit.gap, left - fit.gap);
+        if span.1 - span.0 >= fit.least {
+            free.push(span);
+        }
+        reached = reached.max(right);
+    }
+    free
+}
+
+/// The taskbar buttons left of the notification area, from left to right, read through UI
 /// Automation. Blocks for tens of milliseconds, longer if Explorer is busy, so it runs on a
-/// background thread. `None` when UI Automation cannot answer, and the caller then keeps the room
-/// it measured last.
-pub fn buttons_end(taskbar: isize, tray_left: i32) -> Option<i32> {
+/// background thread. `None` when UI Automation cannot answer, and the caller then keeps what it
+/// measured last.
+pub fn buttons(taskbar: isize, tray_left: i32) -> Option<Vec<Span>> {
     let taskbar = HWND(taskbar as *mut c_void);
     let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
-    let end = measure(taskbar, tray_left);
+    let buttons = measure(taskbar, tray_left);
     if initialized {
         unsafe { CoUninitialize() };
     }
-    match end {
-        Ok(end) => Some(end),
+    match buttons {
+        Ok(buttons) => Some(buttons),
         Err(error) => {
             log::debug!("taskbar player: cannot measure the taskbar buttons: {error:#}");
             None
@@ -197,8 +251,8 @@ pub fn buttons_end(taskbar: isize, tray_left: i32) -> Option<i32> {
     }
 }
 
-fn measure(taskbar: HWND, tray_left: i32) -> windows::core::Result<i32> {
-    let mut end = i32::MIN;
+fn measure(taskbar: HWND, tray_left: i32) -> windows::core::Result<Vec<Span>> {
+    let mut spans = Vec::new();
     unsafe {
         let automation: IUIAutomation =
             CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
@@ -214,11 +268,12 @@ fn measure(taskbar: HWND, tray_left: i32) -> windows::core::Result<i32> {
                 continue;
             };
             if rect.right > rect.left && rect.right <= tray_left {
-                end = end.max(rect.right);
+                spans.push((rect.left, rect.right));
             }
         }
     }
-    Ok(end)
+    spans.sort_unstable();
+    Ok(spans)
 }
 
 /// Whether a full screen app or presentation is up right now, for the player's first showing.
@@ -230,11 +285,25 @@ pub fn fullscreen_now() -> bool {
     state == QUNS_BUSY || state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_PRESENTATION_MODE
 }
 
-/// Turns a GPUI popup into something that lives on the taskbar: a click on it never takes focus
-/// from the app in front, and DWM draws no rounded corners or border around its transparent
-/// edges.
+/// Turns a GPUI popup into something that lives on the taskbar: it has no frame, so it draws all
+/// the way to its edges, a click on it never takes focus from the app in front unless it
+/// `activates`, and DWM draws no rounded corners or border around its transparent edges.
 pub fn dress(hwnd: HWND, activates: bool) {
     unsafe {
+        // GPUI's popups are overlapped windows, whose caption makes Windows keep an invisible
+        // frame at the sides and the bottom.
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+        let frameless = (style & !WS_CAPTION.0) | WS_POPUP.0;
+        SetWindowLongPtrW(hwnd, GWL_STYLE, frameless as isize);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
         if !activates {
             let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE.0 as isize);
@@ -296,6 +365,13 @@ pub fn show(hwnd: HWND, shown: bool) {
         false => SW_HIDE,
     };
     let _ = unsafe { ShowWindow(hwnd, command) };
+}
+
+/// Where the pointer is on the screen, in physical pixels.
+pub fn cursor() -> Option<POINT> {
+    let mut point = POINT::default();
+    unsafe { GetCursorPos(&mut point) }.ok()?;
+    Some(point)
 }
 
 pub fn window_rect(hwnd: HWND) -> Option<RECT> {

@@ -1,8 +1,8 @@
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, SharedString, Window};
+use gpui::{AnyElement, App, Context, SharedString, Window, div};
 use i18n::{Language, t};
 use router::{NavEntry, Screen};
-use ui::{MenuItem, OptionCard, Pace, Picker, Rounding, Saver, Stillness, Switch};
+use ui::{Button, MenuItem, OptionCard, Pace, Picker, Rounding, Saver, Stillness, Switch};
 
 use super::appearance::corner;
 use super::rows::{Announced as _, grid, segmented};
@@ -483,16 +483,37 @@ impl SettingsView {
     }
 
     pub(super) fn taskbar_player_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let on = self.settings.read(cx).taskbar_player();
+        let settings = self.settings.read(cx);
+        let on = settings.taskbar_player();
+        let moved = on && settings.taskbar_player_spot().is_some();
+        let reset = moved.then(|| {
+            Button::new("taskbar-player-reset")
+                .small()
+                .ghost()
+                .icon("icons/undo-2.svg")
+                .tooltip("settings-taskbar-player-reset")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.settings.update(cx, |settings, cx| {
+                        settings.set_taskbar_player_spot(None, cx)
+                    });
+                }))
+        });
 
         self.row(
             t!("settings-taskbar-player"),
-            Switch::new("taskbar-player", on)
-                .name(t!("settings-taskbar-player"))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings
-                        .update(cx, |settings, cx| settings.set_taskbar_player(!on, cx));
-                }))
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .children(reset)
+                .child(
+                    Switch::new("taskbar-player", on)
+                        .name(t!("settings-taskbar-player"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.settings
+                                .update(cx, |settings, cx| settings.set_taskbar_player(!on, cx));
+                        })),
+                )
                 .into_any_element(),
         )
     }
