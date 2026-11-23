@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::prelude::*;
@@ -28,8 +30,19 @@ const ITEM_MENU_WIDTH: Pixels = px(196.);
 /// How narrow a menu over several selected tracks can get, since its labels carry the count.
 const SELECTION_MENU_WIDTH: Pixels = px(248.);
 
+/// How wide a list of playlists is, and how tall it gets before it scrolls.
+const PLAYLIST_MENU_WIDTH: Pixels = px(220.);
+const PLAYLIST_MENU_HEIGHT: Pixels = px(360.);
+
 /// Opens the playlist editor for New playlist in a playlist menu.
 pub(crate) type Create = fn(Edit, &mut Window, &mut App);
+
+/// Runs once a playlist in `ItemMenu::player` is picked.
+pub(crate) type Picked = Rc<dyn Fn(&mut App)>;
+
+/// The order each list of playlists was first drawn in, by shelf, with `None` for a list of
+/// both.
+type Orders = Rc<RefCell<HashMap<Option<Shelf>, HashMap<String, usize>>>>;
 
 /// Something a context menu can open on, wherever it was clicked.
 #[derive(Clone)]
@@ -82,6 +95,7 @@ pub(crate) struct ItemMenu {
     artist_submenu: SubmenuState,
     playlist_scrollbar: Entity<Scrollbar>,
     playlist_search: MenuSearch,
+    playlist_orders: Orders,
 }
 
 impl ItemMenu {
@@ -91,12 +105,14 @@ impl ItemMenu {
             artist_submenu: SubmenuState::default(),
             playlist_scrollbar,
             playlist_search: MenuSearch::new("menu-search-playlists", cx),
+            playlist_orders: Orders::default(),
         }
     }
 
     pub fn reset(&self, cx: &App) {
         self.playlist_submenu.reset();
         self.playlist_search.reset();
+        self.playlist_orders.borrow_mut().clear();
         self.artist_submenu.reset();
         self.playlist_scrollbar
             .read(cx)
@@ -194,11 +210,6 @@ impl ItemMenu {
         self.build(tracks, None, Some(forget), None, columns, cx)
     }
 
-    /// The Save to submenu for `addition`: the `lead` rows, New playlist, then the playlists on
-    /// `shelf` the listener can add to. The lead rows hide while a search narrows the playlists.
-    /// A playlist holding every named track is checked, and picking it takes the tracks out
-    /// again with the menu left open. An album is never checked, since its tracks are only read
-    /// once it is added, and picking a playlist for it closes the menu.
     /// The playlists of `track`'s provider, as a panel of its own for the taskbar player's
     /// picker. `create` opens the editor for New playlist, which the picker is too small to hold.
     pub(crate) fn picker(&self, track: &Track, create: Create, cx: &App) -> Menu {
@@ -207,6 +218,82 @@ impl ItemMenu {
         self.playlist_rows_with(Addition::Tracks(ids), shelf, Vec::new(), create, cx)
     }
 
+    /// Every playlist of the library, the ones used last first, as a panel of its own for the
+    /// taskbar player. A pick plays the playlist and runs `picked`. The one playing is checked,
+    /// and picking it resumes it when it is paused.
+    pub(crate) fn player(&self, playback: &Entity<Playback>, picked: Picked, cx: &App) -> Menu {
+        let sonora = Sonora::global(cx);
+        let (library, session) = (sonora.library.read(cx), sonora.session.read(cx));
+        let playlists: Vec<Playlist> = [Shelf::Streaming, Shelf::Local]
+            .into_iter()
+            .filter(|shelf| session.client_of(*shelf).is_some())
+            .flat_map(|shelf| library.state(shelf).playlists().iter().cloned())
+            .collect();
+        let menu = Menu::new("play-playlist-menu").w(PLAYLIST_MENU_WIDTH);
+        if playlists.is_empty() {
+            return menu.item(MenuItem::new("no-playlists", t!("menu-no-playlists")).disabled());
+        }
+        let query = self.playlist_search.query(cx);
+        let mut found = self.settled(None, playlists, cx);
+        found.retain(|playlist| playlist.name.to_lowercase().contains(&query));
+
+        menu.max_h(PLAYLIST_MENU_HEIGHT)
+            .scrollbar(self.playlist_scrollbar.clone())
+            .search(self.playlist_search.clone())
+            .when(found.is_empty(), |menu| {
+                menu.item(
+                    MenuItem::new("no-matching-playlists", t!("search-no-matches")).disabled(),
+                )
+            })
+            .items(found.into_iter().map(|playlist| {
+                let origin = Origin::playlist(playlist.id.clone()).named(playlist.name.clone());
+                let playing = playback.read(cx).playing_from(&origin, cx);
+                let (playback, picked) = (playback.clone(), picked.clone());
+
+                MenuItem::new(format!("play-playlist-{}", playlist.id), playlist.name)
+                    .artwork(playlist.cover)
+                    .selected(playing.is_some())
+                    .on_click(move |_, _, cx| {
+                        playback.update(cx, |playback, cx| {
+                            match playback.playing_from(&origin, cx) {
+                                Some(true) => {}
+                                Some(false) => playback.toggle_play(cx),
+                                None => playback.play_origin(origin.clone(), cx),
+                            }
+                        });
+                        picked(cx);
+                    })
+            }))
+    }
+
+    /// Puts the playlists used last first, then keeps them where they are until the menu opens
+    /// again. Adding a track makes its playlist the newest, and the row would otherwise leave
+    /// from under the pointer. One that joins meanwhile goes on top.
+    fn settled(
+        &self,
+        shelf: Option<Shelf>,
+        mut playlists: Vec<Playlist>,
+        cx: &App,
+    ) -> Vec<Playlist> {
+        Sonora::global(cx).recency.read(cx).sort(&mut playlists, cx);
+        if playlists.is_empty() {
+            return playlists;
+        }
+        let mut orders = self.playlist_orders.borrow_mut();
+        let order = orders.entry(shelf).or_insert_with(|| {
+            let ids = playlists.iter().map(|playlist| playlist.id.clone());
+            ids.zip(0..).collect()
+        });
+        playlists.sort_by_key(|playlist| order.get(&playlist.id).copied());
+        playlists
+    }
+
+    /// The Save to submenu for `addition`: the `lead` rows, New playlist, then the playlists on
+    /// `shelf` the listener can add to, the ones used last first. The lead rows hide while a
+    /// search narrows the playlists. A playlist holding every named track is checked, and
+    /// picking it takes the tracks out again with the menu left open. An album is never checked,
+    /// since its tracks are only read once it is added, and picking a playlist for it closes the
+    /// menu.
     fn playlist_rows(
         &self,
         addition: Addition,
@@ -234,6 +321,7 @@ impl ItemMenu {
             .filter(|playlist| playlist.takes_tracks())
             .cloned()
             .collect();
+        let playlists = self.settled(Some(shelf), playlists, cx);
         let ids = match &addition {
             Addition::Tracks(ids) => ids.clone(),
             Addition::Album(_) => Vec::new(),
@@ -254,7 +342,7 @@ impl ItemMenu {
             });
         if playlists.is_empty() {
             Menu::new("playlist-submenu")
-                .w(gpui::px(220.))
+                .w(PLAYLIST_MENU_WIDTH)
                 .items(lead)
                 .item(new_playlist)
                 .item(MenuItem::separator("playlist-separator"))
@@ -268,8 +356,8 @@ impl ItemMenu {
                 .collect();
             let unmatched = found.is_empty();
             Menu::new("playlist-submenu")
-                .w(gpui::px(220.))
-                .max_h(gpui::px(360.))
+                .w(PLAYLIST_MENU_WIDTH)
+                .max_h(PLAYLIST_MENU_HEIGHT)
                 .scrollbar(self.playlist_scrollbar.clone())
                 .search(self.playlist_search.clone())
                 .when(!searching, |menu| {

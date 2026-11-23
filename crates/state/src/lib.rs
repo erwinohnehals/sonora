@@ -26,6 +26,7 @@ mod playback;
 mod potoken;
 mod profile;
 mod queue;
+mod recency;
 mod remote;
 mod requirements;
 mod scan;
@@ -83,6 +84,7 @@ pub use queue::{
     Queue, QueueKind, QueuePlacement, QueuePosition, QueueSections, QueueSlot, QueueView, Resume,
     Stub,
 };
+pub use recency::Recency;
 pub use remote::{Remote, attach as attach_remote};
 pub use requirements::{Requirement, Requirements};
 pub use scan::Scan;
@@ -255,6 +257,7 @@ pub struct Sonora {
     /// that it keeps ticking.
     pub potoken: Entity<potoken::PoToken>,
     pub queue: Entity<Queue>,
+    pub recency: Entity<Recency>,
     pub requirements: Entity<Requirements>,
     pub scan: Entity<Scan>,
     pub scrobbling: Entity<Scrobbling>,
@@ -432,6 +435,15 @@ pub fn init(
         }
     })
     .detach();
+    let recency = cx.new(|cx| {
+        Recency::new(
+            settings.clone(),
+            library.clone(),
+            playback.clone(),
+            devices.clone(),
+            cx,
+        )
+    });
     let links = cx.new(|cx| Links::new(session.clone(), devices.clone(), settings.clone(), cx));
     let control = cx.new(|cx| Control::new(session.clone(), playback.clone(), library.clone(), cx));
     discord::attach(
@@ -466,6 +478,7 @@ pub fn init(
         playback,
         potoken,
         queue,
+        recency,
         requirements,
         scan,
         scrobbling,

@@ -1,6 +1,6 @@
-//! The small player that sits on the Windows taskbar, and the playlist picker it opens.
+//! The small player that sits on the Windows taskbar, and the playlist pickers it opens.
 //!
-//! Both are windows of their own, which `sonora` opens, places over the taskbar and keeps on
+//! They are windows of their own, which `sonora` opens, places over the taskbar and keeps on
 //! top of it. This module only draws them. Each window is too small to show a tooltip in, so
 //! the buttons keep their tooltip text as their accessible name and draw none.
 
@@ -25,7 +25,11 @@ use crate::shared::transport;
 
 /// The narrowest the capsule still shows the title and artist. Narrower, it keeps the cover and
 /// the buttons, since the taskbar has no more room for it.
-const TEXT_ROOM: Pixels = px(240.);
+const TEXT_ROOM: Pixels = px(268.);
+
+/// The narrowest the capsule still shows the Play a playlist button. Narrower, only the cover and
+/// the other five buttons fit.
+const CHOOSE_ROOM: Pixels = px(224.);
 
 /// The capsule's outline, which the cover has to fit inside with the rest.
 const BORDER: Pixels = px(1.);
@@ -37,12 +41,36 @@ const DRAG_START: Pixels = px(4.);
 /// The clear room around the picker's panel, so its shadow is not cut off at the window's edge.
 const SHADOW_ROOM: Pixels = px(12.);
 
+/// What a playlist picked in the picker is for.
+#[derive(Clone)]
+pub enum PickPurpose {
+    /// The track goes into the playlist.
+    Add(Box<Track>),
+    /// The playlist plays.
+    Play,
+}
+
+impl PickPurpose {
+    /// Whether both are opened by the same button.
+    pub fn same(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+
+    /// The text naming the picker and the button that opens it.
+    fn key(&self) -> &'static str {
+        match self {
+            Self::Add(_) => "menu-add-to-playlist",
+            Self::Play => "taskbar-play-playlist",
+        }
+    }
+}
+
 /// What the taskbar player asks of the window around it.
 pub enum TaskbarPlayerEvent {
-    /// Open the playlist picker for the playing track, above `anchor`, which is the Add to
-    /// playlist button's bounds in the window.
+    /// Open the playlist picker above `anchor`, the bounds in the window of the button that
+    /// asked.
     Pick {
-        track: Box<Track>,
+        purpose: PickPurpose,
         anchor: Bounds<Pixels>,
     },
     /// The player is being dragged and goes where the pointer is, which holds it `grab` from the
@@ -62,13 +90,14 @@ struct Press {
 }
 
 /// The capsule on the taskbar: the playing cover, title and artist, the heart, Add to playlist,
-/// and previous, play or pause and next.
+/// Play a playlist, and previous, play or pause and next.
 pub struct TaskbarPlayer {
     playback: Entity<Playback>,
-    /// Where the Add to playlist button was last drawn, so the picker opens above it.
-    pick_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// Whether the picker is open, which the Add to playlist button tells screen readers.
-    picking: bool,
+    /// Where the two buttons that open a picker were last drawn, so it opens above them.
+    add_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    choose_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// What the open picker is for, which its button tells screen readers.
+    picking: Option<PickPurpose>,
     press: Option<Press>,
 }
 
@@ -87,29 +116,38 @@ impl TaskbarPlayer {
         cx.observe(&devices, |_, _, cx| cx.notify()).detach();
         Self {
             playback,
-            pick_bounds: Rc::default(),
-            picking: false,
+            add_bounds: Rc::default(),
+            choose_bounds: Rc::default(),
+            picking: None,
             press: None,
         }
     }
 
-    /// Tells the Add to playlist button whether the picker it opened is showing.
-    pub fn set_picking(&mut self, picking: bool, cx: &mut Context<Self>) {
-        if self.picking != picking {
-            self.picking = picking;
-            cx.notify();
-        }
+    /// Tells the buttons which picker is showing, if any.
+    pub fn set_picking(&mut self, picking: Option<PickPurpose>, cx: &mut Context<Self>) {
+        self.picking = picking;
+        cx.notify();
     }
 
-    fn pick(&mut self, cx: &mut Context<Self>) {
+    fn add(&mut self, cx: &mut Context<Self>) {
         let Some(track) = self.playback.read(cx).shown_track(cx) else {
             return;
         };
-        let Some(anchor) = self.pick_bounds.get() else {
+        let Some(anchor) = self.add_bounds.get() else {
             return;
         };
         cx.emit(TaskbarPlayerEvent::Pick {
-            track: Box::new(track),
+            purpose: PickPurpose::Add(Box::new(track)),
+            anchor,
+        });
+    }
+
+    fn choose(&mut self, cx: &mut Context<Self>) {
+        let Some(anchor) = self.choose_bounds.get() else {
+            return;
+        };
+        cx.emit(TaskbarPlayerEvent::Pick {
+            purpose: PickPurpose::Play,
             anchor,
         });
     }
@@ -272,7 +310,10 @@ impl Render for TaskbarPlayer {
         // The cover is as tall as the taskbar lets it be.
         let cover_size = (viewport.height - theme.metrics.pad - BORDER * 2.).max(Pixels::ZERO);
         let playable = track.as_ref().is_some_and(|track| track.id.is_some());
-        let bounds = self.pick_bounds.clone();
+        let add_bounds = self.add_bounds.clone();
+        let choose_bounds = self.choose_bounds.clone();
+        let adding = matches!(self.picking, Some(PickPurpose::Add(_)));
+        let choosing = matches!(self.picking, Some(PickPurpose::Play));
 
         let add = Button::new("taskbar-add-to-playlist")
             .ghost()
@@ -282,9 +323,19 @@ impl Render for TaskbarPlayer {
             .tint(theme.muted_foreground)
             .tooltip_above("menu-add-to-playlist")
             .tipless()
-            .expanded(self.picking)
+            .expanded(adding)
             .disabled(!playable)
-            .on_click(cx.listener(|this, _, _, cx| this.pick(cx)));
+            .on_click(cx.listener(|this, _, _, cx| this.add(cx)));
+        let choose = Button::new("taskbar-play-playlist")
+            .ghost()
+            .backgroundless()
+            .small()
+            .icon("icons/list-music.svg")
+            .tint(theme.muted_foreground)
+            .tooltip_above(PickPurpose::Play.key())
+            .tipless()
+            .expanded(choosing)
+            .on_click(cx.listener(|this, _, _, cx| this.choose(cx)));
 
         div()
             .size_full()
@@ -317,10 +368,19 @@ impl Render for TaskbarPlayer {
                             .child(
                                 div()
                                     .on_children_prepainted(move |children, _, _| {
-                                        bounds.set(children.first().copied());
+                                        add_bounds.set(children.first().copied());
                                     })
                                     .child(add),
                             )
+                            .when(viewport.width >= CHOOSE_ROOM, |this| {
+                                this.child(
+                                    div()
+                                        .on_children_prepainted(move |children, _, _| {
+                                            choose_bounds.set(children.first().copied());
+                                        })
+                                        .child(choose),
+                                )
+                            })
                             .child(transport::previous(&self.playback, false, cx).tipless())
                             .child(transport::toggle(&self.playback, false, false, cx).tipless())
                             .child(transport::next(&self.playback, false, cx).tipless()),
@@ -334,20 +394,21 @@ pub enum PlaylistPickerEvent {
     /// The panel measured so the window has to be `size`, which leaves `margin` clear around
     /// the panel for its shadow. The window goes `margin` lower than the panel's own edge.
     Fit { size: Size<Pixels>, margin: Pixels },
-    /// The picker is done: Escape, or a click away from it.
+    /// The picker is done: Escape, a click away from it, or a playlist picked to play.
     Close,
 }
 
-/// The playlists the playing track can go into, as a panel filling a window of its own above
-/// the taskbar player. A pick adds the track, or takes it out of a playlist that holds it, and
-/// the panel stays open for the next one.
+/// A list of playlists as a panel filling a window of its own above the taskbar player. Picking
+/// one to add to puts the playing track in, or takes it out of a playlist that holds it, and the
+/// panel stays open for the next one. Picking one to play closes the panel.
 pub struct PlaylistPicker {
-    track: Track,
+    purpose: PickPurpose,
+    playback: Entity<Playback>,
     menus: ItemMenu,
     /// The size last reported, so a frame that measures the same asks nothing of the window.
     fitted: Option<Size<Pixels>>,
     /// Whether the window has been active yet. One the system never let come to the front
-    /// stays open until the Add to playlist button closes it, rather than closing unseen.
+    /// stays open until its button closes it, rather than closing unseen.
     was_active: bool,
     _activation: Subscription,
 }
@@ -355,9 +416,11 @@ pub struct PlaylistPicker {
 impl EventEmitter<PlaylistPickerEvent> for PlaylistPicker {}
 
 impl PlaylistPicker {
-    pub fn new(track: Track, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(purpose: PickPurpose, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let library = Sonora::global(cx).library.clone();
+        let playback = Sonora::global(cx).playback.clone();
         cx.observe(&library, |_, _, cx| cx.notify()).detach();
+        cx.observe(&playback, |_, _, cx| cx.notify()).detach();
         let me = cx.entity_id();
         let scrollbar = cx.new(|_| ui::Scrollbar::inset().watching(me));
         // The picker is a menu, so it closes the moment focus goes anywhere else.
@@ -369,7 +432,8 @@ impl PlaylistPicker {
             }
         });
         Self {
-            track,
+            purpose,
+            playback,
             menus: ItemMenu::new(scrollbar, cx),
             fitted: None,
             was_active: window.is_window_active(),
@@ -400,14 +464,23 @@ impl PlaylistPicker {
 impl Render for PlaylistPicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_rem_size(cx.theme().font_size);
-        let menu: Menu = self
-            .menus
-            .picker(&self.track, create_in_main_window, cx)
-            .name(t!("menu-add-to-playlist"))
-            .inline()
-            .top(SHADOW_ROOM)
-            .left(SHADOW_ROOM);
         let this = cx.entity().downgrade();
+        let menu: Menu = match &self.purpose {
+            PickPurpose::Add(track) => self.menus.picker(track, create_in_main_window, cx),
+            PickPurpose::Play => {
+                let picker = this.clone();
+                let close = move |cx: &mut gpui::App| {
+                    picker
+                        .update(cx, |_, cx| cx.emit(PlaylistPickerEvent::Close))
+                        .ok();
+                };
+                self.menus.player(&self.playback, Rc::new(close), cx)
+            }
+        }
+        .name(i18n::lookup(self.purpose.key(), None))
+        .inline()
+        .top(SHADOW_ROOM)
+        .left(SHADOW_ROOM);
 
         div()
             .size_full()

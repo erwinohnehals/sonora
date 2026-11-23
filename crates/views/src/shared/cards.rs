@@ -9,6 +9,7 @@ use ui::{ActiveTheme as _, Card, InlineLinks, Pinnable, Text, Theme};
 use crate::shared::cells;
 use crate::shared::menus::{CardMenu, Item};
 use crate::shared::pins::Pinned as _;
+use crate::shared::song_drop::TakesSongs as _;
 
 const BULLET: SharedString = SharedString::new_static("·");
 /// How many of a release's credits a card lists. Anything past this is clipped by the card's
@@ -111,6 +112,7 @@ pub(crate) fn playlist_card(
             playback.clone(),
         ))
         .when_some(pin, Pinnable::pin)
+        .takes_songs(&playlist.id)
 }
 
 /// The card of a track with nothing wired to play it: name, cover, explicit mark, pin and the

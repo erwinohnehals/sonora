@@ -354,6 +354,8 @@ const THEMES_DIRECTORY: &str = "themes";
 const DEFAULT_VOLUME: f32 = 0.7;
 /// How many chosen search results the history keeps, across every provider.
 const PICKS: usize = 40;
+/// How many playlists keep the time they were last used, across every provider.
+const PLAYLIST_USES: usize = 300;
 const DEFAULT_SIDEBAR_WIDTH: f32 = 195.;
 const DEFAULT_SIDEBAR_RIGHT_WIDTH: f32 = 254.;
 const DEFAULT_FONT_SIZE: f32 = 14.;
@@ -859,6 +861,8 @@ struct StateValues {
     theme_variants: HashMap<String, String>,
     /// The search results the listener chose, newest first, without repeats.
     picks: Vec<Picked>,
+    /// When each playlist was last played or changed here, in unix seconds, by playlist id.
+    playlist_uses: HashMap<String, i64>,
 }
 
 impl Default for StateValues {
@@ -892,6 +896,7 @@ impl Default for StateValues {
             system_theme: ThemeKind::Dark.id().to_owned(),
             theme_variants: HashMap::new(),
             picks: Vec::new(),
+            playlist_uses: HashMap::new(),
         }
     }
 }
@@ -2510,6 +2515,25 @@ impl AppSettings {
             },
         );
         picks.truncate(PICKS);
+        self.save_state_quietly(cx);
+    }
+
+    /// When the playlist was last played or changed here, in unix seconds.
+    pub fn playlist_use(&self, id: &str) -> Option<i64> {
+        self.state.playlist_uses.get(id).copied()
+    }
+
+    /// Notes that a playlist was played or changed at `at`, dropping the one used longest ago
+    /// past the cap. The save skips settings observers, since no screen follows the stamps.
+    pub fn use_playlist(&mut self, id: String, at: i64, cx: &mut Context<Self>) {
+        let uses = &mut self.state.playlist_uses;
+        uses.insert(id, at);
+        if uses.len() > PLAYLIST_USES {
+            let oldest = uses.iter().min_by_key(|(_, at)| **at);
+            if let Some(oldest) = oldest.map(|(id, _)| id.clone()) {
+                uses.remove(&oldest);
+            }
+        }
         self.save_state_quietly(cx);
     }
 

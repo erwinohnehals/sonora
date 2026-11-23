@@ -1,4 +1,4 @@
-//! The small player on the Windows taskbar, and the playlist picker it opens.
+//! The small player on the Windows taskbar, and the playlist pickers it opens.
 //!
 //! [`views::TaskbarPlayer`] draws the player and [`views::PlaylistPicker`] the picker; this module
 //! opens their windows, lays the player over a free stretch of the taskbar, and keeps it there as
@@ -20,20 +20,20 @@ use gpui::{
     Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
     WindowOptions, point, px, size,
 };
-use music::Track;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use state::{Sonora, TaskbarSpot};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 use ui::ActiveTheme as _;
-use views::{PlaylistPicker, PlaylistPickerEvent, TaskbarPlayer, TaskbarPlayerEvent};
+use views::{PickPurpose, PlaylistPicker, PlaylistPickerEvent, TaskbarPlayer, TaskbarPlayerEvent};
 use windows::Win32::Foundation::{HWND, RECT};
 
 use shell::{Fit, Signal, Span, Taskbar, Watch, Wish};
 
 /// The widest the player grows, in logical pixels, when the taskbar has the room.
-const MOST: f32 = 360.;
+const MOST: f32 = 388.;
 
-/// The narrowest the player still shows, in logical pixels: the cover and the five buttons.
+/// The narrowest the player still shows, in logical pixels: the cover and five buttons, without
+/// Play a playlist.
 /// With less room than this it stays hidden rather than cover the taskbar's buttons.
 const LEAST: f32 = 196.;
 
@@ -101,7 +101,8 @@ struct Player {
 struct Picker {
     window: WindowHandle<PlaylistPicker>,
     hwnd: HWND,
-    /// The Add to playlist button's bounds in the player, which the picker opens above.
+    purpose: PickPurpose,
+    /// The bounds in the player of the button that opened the picker, which it opens above.
     anchor: Bounds<Pixels>,
     _events: Subscription,
 }
@@ -165,8 +166,8 @@ impl Host {
         let _events = cx.subscribe(
             &entity,
             |this, _, event: &TaskbarPlayerEvent, cx| match event {
-                TaskbarPlayerEvent::Pick { track, anchor } => {
-                    this.toggle_picker((**track).clone(), *anchor, cx)
+                TaskbarPlayerEvent::Pick { purpose, anchor } => {
+                    this.toggle_picker(purpose.clone(), *anchor, cx)
                 }
                 TaskbarPlayerEvent::Drag { grab } => this.drag(*grab, cx),
                 TaskbarPlayerEvent::Drop => this.settle_drag(cx),
@@ -416,10 +417,18 @@ impl Host {
         }));
     }
 
-    /// Opens the picker above the Add to playlist button, or closes it when it is open.
-    fn toggle_picker(&mut self, track: Track, anchor: Bounds<Pixels>, cx: &mut Context<Self>) {
-        if self.picker.is_some() {
-            self.close_picker(cx);
+    /// Opens the picker above the button that asked for it, or closes it when that button opened
+    /// the one showing. The other button's picker gives way to it.
+    fn toggle_picker(
+        &mut self,
+        purpose: PickPurpose,
+        anchor: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let open = self.picker.as_ref().map(|picker| &picker.purpose);
+        let again = open.is_some_and(|open| open.same(&purpose));
+        self.close_picker(cx);
+        if again {
             return;
         }
         let Some(player) = self.player.as_ref() else {
@@ -427,7 +436,8 @@ impl Host {
         };
         let opened = cx.open_window(popup(true), |window, cx| {
             window.set_rem_size(cx.theme().font_size);
-            cx.new(|cx| PlaylistPicker::new(track, window, cx))
+            let purpose = purpose.clone();
+            cx.new(|cx| PlaylistPicker::new(purpose, window, cx))
         });
         let window = match opened {
             Ok(window) => window,
@@ -453,19 +463,20 @@ impl Host {
                 PlaylistPickerEvent::Close => this.close_picker(cx),
             },
         );
-        player
-            .entity
-            .update(cx, |player, cx| player.set_picking(true, cx));
+        player.entity.update(cx, |player, cx| {
+            player.set_picking(Some(purpose.clone()), cx)
+        });
         self.picker = Some(Picker {
             window,
             hwnd,
+            purpose,
             anchor,
             _events,
         });
     }
 
     /// Sizes the picker to its panel and stands it on the taskbar's top edge, its right side
-    /// level with the Add to playlist button's and kept on the taskbar's monitor.
+    /// level with its button's and kept on the taskbar's monitor.
     fn fit_picker(&mut self, size: Size<Pixels>, margin: Pixels, cx: &mut Context<Self>) {
         let (Some(player), Some(picker)) = (self.player.as_ref(), self.picker.as_ref()) else {
             return;
@@ -504,7 +515,7 @@ impl Host {
         if let Some(player) = self.player.as_ref() {
             player
                 .entity
-                .update(cx, |player, cx| player.set_picking(false, cx));
+                .update(cx, |player, cx| player.set_picking(None, cx));
         }
         let window = picker.window;
         cx.defer(move |cx| {

@@ -13,7 +13,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Right-click a local song and pick Show in File Explorer (Finder on macOS) to open its folder with
   the file selected.
 - Export your favorites and playlists from Settings → Providers → Export library. Sonora saves one spreadsheet per list and a `library.json` with every song's title, artists, album, ISRC, date added and link, so you keep a record of your library outside the service.
-- Put a small player on the Windows taskbar from Settings → General → Window. It sits at the left end, or wherever along the taskbar you drag it, and shows the playing song with its cover, plays, pauses and skips, likes the song, and adds it to a playlist from a searchable list, without bringing Sonora's window up.
+- Put a small player on the Windows taskbar from Settings → General → Window. It sits at the left end, or wherever along the taskbar you drag it, and shows the playing song with its cover, plays, pauses and skips, likes the song, and adds it to a playlist or plays another one from a searchable list, without bringing Sonora's window up.
+- Drag a song onto any of your playlists to add it: onto its card on any page, its row in Library → Playlists, its open page, or the sidebar, which lists the playlists you have not pinned while you drag and scrolls when you hold the song near its top or bottom.
+
+### Changed
+
+- Add to playlist lists the playlists you played or changed last first.
 
 ### Fixed
 

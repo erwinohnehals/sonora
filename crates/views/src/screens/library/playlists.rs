@@ -9,12 +9,13 @@ use state::{
     Collection, Library, LibraryPart, LibraryState, Network, Origin, Playback, Shelf, Sonora,
 };
 use ui::rank::{ESSENTIAL, HANDY, NICE, SPARE};
-use ui::{Cell, ColumnSpec, Menu, Pin, TableSource, Width};
+use ui::{Cell, ColumnSpec, Menu, Pin, Receive, TableSource, Width};
 
 use crate::shared::blend::{self, Joined, Reach};
 use crate::shared::cells::{self, DATE, NUMBER, TRAILING};
 use crate::shared::menus::playlist_menu;
 use crate::shared::pins::Pinned as _;
+use crate::shared::song_drop;
 use crate::shared::text::{folded, holds};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -211,6 +212,23 @@ impl TableSource for PlaylistSource {
 
     fn pin(&self, row: usize, cx: &App) -> Option<Pin> {
         self.playlists(cx).get(row)?.pin()
+    }
+
+    fn takes(&self, row: usize, pin: &Pin, cx: &App) -> bool {
+        self.playlists(cx)
+            .get(row)
+            .is_some_and(|playlist| song_drop::accepts(pin, &playlist.id, cx))
+    }
+
+    fn receive(&self, row: usize, pin: &Pin, cx: &App) -> Option<Receive> {
+        let playlist = self.playlists(cx).get(row)?.id.clone();
+        if !song_drop::accepts(pin, &playlist, cx) {
+            return None;
+        }
+        let song = pin.clone();
+        Some(Box::new(move |window, cx| {
+            song_drop::add(&playlist, &song, window, cx)
+        }))
     }
 
     fn picking(&self) -> bool {

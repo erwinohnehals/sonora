@@ -64,6 +64,9 @@ pub const ROW_GROUP: &str = "table-row";
 /// from a pin dragged in from elsewhere.
 const ROWS: &str = "table-rows";
 
+/// What a source does with a pin dropped on one of its rows.
+pub type Receive = Box<dyn FnOnce(&mut Window, &mut App) + 'static>;
+
 /// Whether a table's rows can be dragged into a new order. Only a table in the source's own
 /// order offers it, since a move counts places in that order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,6 +154,19 @@ pub trait TableSource: 'static {
     }
 
     fn pin(&self, _row: usize, _cx: &App) -> Option<Pin> {
+        None
+    }
+
+    /// Whether a pin dropped on `row` lands on that row itself, which lights it while the pin is
+    /// held over it.
+    fn takes(&self, _row: usize, _pin: &Pin, _cx: &App) -> bool {
+        false
+    }
+
+    /// What a pin dropped on `row` does, unless it is one of the table's own rows being moved.
+    /// `None` when the source does not want it. The answer runs once the table is done with the
+    /// drop, so it may update the table.
+    fn receive(&self, _row: usize, _pin: &Pin, _cx: &App) -> Option<Receive> {
         None
     }
 
@@ -821,13 +837,13 @@ impl<S: TableSource> TableState<S> {
         }
     }
 
-    /// Answers a pin dropped on displayed row `target`. Only a row of this table counts, known
-    /// by the pin it carries still being the one its row gives.
-    fn land(&mut self, dragged: &DraggedPin, target: usize, cx: &mut Context<Self>) {
+    /// Answers a pin dropped on displayed row `target`, and says whether it was a row of this
+    /// table, known by the pin it carries still being the one its row gives.
+    fn land(&mut self, dragged: &DraggedPin, target: usize, cx: &mut Context<Self>) -> bool {
         let gap = self.drop_gap.take();
         cx.notify();
         let Some(held) = dragged.spot(ROWS) else {
-            return;
+            return false;
         };
         let ours = self
             .delegate
@@ -835,7 +851,7 @@ impl<S: TableSource> TableState<S> {
             .pin(held.index, cx)
             .is_some_and(|pin| pin.same(&dragged.pin));
         if !ours {
-            return;
+            return false;
         }
         match (self.row_moves(cx), gap) {
             (RowMoves::On, Some(gap)) => {
@@ -851,6 +867,7 @@ impl<S: TableSource> TableState<S> {
             (RowMoves::Refused, _) if target != held.index => cx.emit(TableEvent::MoveRefused),
             _ => {}
         }
+        true
     }
 
     pub fn follow(mut self, scroll: ScrollHandle) -> Self {
@@ -1481,11 +1498,30 @@ impl<S: TableSource> TableState<S> {
                                 move |this, event: &DragMoveEvent<DraggedPin>, _, cx| {
                                     this.hover_gap(event, display, cx)
                                 },
-                            ))
-                            .on_drop(cx.listener(move |this, dragged: &DraggedPin, _, cx| {
-                                this.land(dragged, display, cx)
-                            })),
+                            )),
                     })
+                    .drag_over::<DraggedPin>({
+                        let table = cx.weak_entity();
+                        move |style, dragged, _, cx| {
+                            let takes = table.upgrade().is_some_and(|table| {
+                                let source = table.read(cx).delegate.source();
+                                source.takes(row, &dragged.pin, cx)
+                            });
+                            match takes {
+                                true => style.bg(cx.theme().table_active),
+                                false => style,
+                            }
+                        }
+                    })
+                    .on_drop(cx.listener(move |this, dragged: &DraggedPin, window, cx| {
+                        if moves != RowMoves::Off && this.land(dragged, display, cx) {
+                            return;
+                        }
+                        let source = this.delegate.source();
+                        if let Some(receive) = source.receive(row, &dragged.pin, cx) {
+                            window.defer(cx, receive);
+                        }
+                    }))
                     .when_some(self.delegate.source.tip(row, cx), |this, text| {
                         this.tip_label(text, Perch::Follow)
                     })

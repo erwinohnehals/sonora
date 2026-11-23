@@ -38,7 +38,7 @@ static READS: Semaphore = Semaphore::const_new(4);
 
 /// Which provider a library page, an id or a playlist belongs to. The streaming shelf follows
 /// the signed-in provider; the local shelf follows the imported folder.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Shelf {
     Streaming,
     Local,
@@ -685,7 +685,8 @@ fn dated<'a>(rows: impl Iterator<Item = (Option<&'a str>, Option<i64>)>) -> Hash
         .collect()
 }
 
-fn stamp() -> i64 {
+/// The current time in unix seconds.
+pub(crate) fn stamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -1121,6 +1122,8 @@ pub enum LibraryEvent {
     PlaylistGone(String),
     /// A playlist an Undo brought back into the library after `PlaylistGone` took it out.
     PlaylistBack(String),
+    /// A playlist the listener made here, or imported from a file.
+    PlaylistCreated(String),
     TrackAdded {
         playlist: String,
     },
@@ -2140,7 +2143,7 @@ impl Library {
                     }
                 }))
             },
-            Self::insert_playlist,
+            Self::welcome_playlist,
             cx,
         );
     }
@@ -2224,7 +2227,7 @@ impl Library {
             },
             |this, result, cx| match result {
                 Ok(created) => {
-                    this.insert_playlist(
+                    this.welcome_playlist(
                         Playlist {
                             id: created.id,
                             name: created.name,
@@ -2341,7 +2344,7 @@ impl Library {
                     0 => "toast-playlist-imported",
                     _ => "toast-playlist-imported-partly",
                 };
-                this.insert_playlist(playlist, cx);
+                this.welcome_playlist(playlist, cx);
                 Toasts::post(
                     Toast::new(Outcome::Done, key)
                         .name(name)
@@ -3501,6 +3504,13 @@ impl Library {
             .ok();
         }));
         true
+    }
+
+    /// Puts a playlist the listener just made on its shelf.
+    fn welcome_playlist(&mut self, playlist: Playlist, cx: &mut Context<Self>) {
+        let id = playlist.id.clone();
+        self.insert_playlist(playlist, cx);
+        cx.emit(LibraryEvent::PlaylistCreated(id));
     }
 
     fn insert_playlist(&mut self, playlist: Playlist, cx: &mut Context<Self>) {

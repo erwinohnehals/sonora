@@ -37,6 +37,7 @@ use crate::shared::hero::{
     ACTION_GAP, HeroMetaStrip, HeroPlayButton, PageHero, copyright_notices, release_date_label,
 };
 use crate::shared::shelves::{Rail, RailSpec};
+use crate::shared::song_drop::TakesSongs as _;
 use crate::shared::tracks::{
     PlaybackStatus, TrackField, TrackSource, Tracks, drop_picked, playback_status, playlist_columns,
 };
@@ -945,10 +946,16 @@ impl Render for DetailView {
             weak.update(cx, |_, cx| cx.notify()).ok();
         });
         let rails = self.recommended(window, &notify, cx);
+        let gathering = self
+            .detail
+            .read(cx)
+            .playlist()
+            .map(|playlist| playlist.id.clone());
 
         div()
             .relative()
             .size_full()
+            .when_some(gathering, |page, id| page.gathers_songs(&id))
             .child(
                 Scroller::new("detail-page", &self.scrollbar)
                     .hold()

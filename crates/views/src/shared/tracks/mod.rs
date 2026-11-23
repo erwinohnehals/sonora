@@ -23,14 +23,15 @@ use state::{
     Sonora,
 };
 use ui::{
-    ArrowRing, Button, Cell, ColumnSpec, Menu, Pending, Pin, ROW_GROUP, RowMoves, Scrollbar,
-    TableSource, TableState,
+    ArrowRing, Button, Cell, ColumnSpec, Menu, Pending, Pin, ROW_GROUP, Receive, RowMoves,
+    Scrollbar, TableSource, TableState,
 };
 
 use crate::shared::blend::{Joined, Reach};
 use crate::shared::cells;
 use crate::shared::confirm::{Confirm, Kind};
 use crate::shared::pins::{Pinned as _, origin_tag};
+use crate::shared::song_drop;
 
 pub(crate) use columns::{
     HISTORY_COLUMNS, LIBRARY_COLUMNS, SONGS_COLUMNS, TrackField, album_columns, artist_columns,
@@ -881,6 +882,18 @@ impl TableSource for TrackSource {
 
     /// A playlist's rows move when its provider keeps the order, and are refused with a
     /// message when the playlist is the listener's but the provider keeps none.
+    /// A song from elsewhere dropped among a playlist's tracks joins the playlist.
+    fn receive(&self, _row: usize, pin: &Pin, cx: &App) -> Option<Receive> {
+        let playlist = self.playlist.as_ref()?.read(cx).id()?.to_owned();
+        if !song_drop::welcomes(pin, &playlist, cx) {
+            return None;
+        }
+        let song = pin.clone();
+        Some(Box::new(move |window, cx| {
+            song_drop::add(&playlist, &song, window, cx)
+        }))
+    }
+
     fn row_moves(&self, cx: &App) -> RowMoves {
         let Some(detail) = &self.playlist else {
             return RowMoves::Off;

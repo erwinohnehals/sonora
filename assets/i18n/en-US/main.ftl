@@ -102,6 +102,7 @@ tray-pause = Pause
 
 # taskbar player
 taskbar-player = Taskbar player
+taskbar-play-playlist = Play a playlist
 
 # table columns
 column-played-at = Played
@@ -851,7 +852,7 @@ settings-now-playing-on-file-open-detail = Switch to the Now playing view when a
 settings-taskbar-progress = Show progress on the taskbar
 settings-taskbar-progress-detail = Fill the Sonora taskbar button with how far the track has played. Turn off to show only the app icon.
 settings-taskbar-player = Show a player on the taskbar
-settings-taskbar-player-detail = Put the playing song, its controls, the heart and Add to playlist on the taskbar. Drag the song to move it along the taskbar.
+settings-taskbar-player-detail = Put the playing song, its controls, the heart, Add to playlist and a list of playlists to play on the taskbar. Drag the song to move it along the taskbar.
 settings-taskbar-player-reset = Move the player back to its usual place
 settings-spotify-connect = Show as a Spotify device
 settings-spotify-connect-name = Device name
